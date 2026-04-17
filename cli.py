@@ -8572,6 +8572,7 @@ class HermesCLI:
                         if event.app.is_running:
                             event.app.exit()
                     event.app.current_buffer.reset(append_to_history=True)
+                    event.app.invalidate()
                     return
 
                 # Snapshot and clear attached images
