@@ -101,6 +101,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("model", "切换模型", "配置", 参数提示="[模型] [--global]"),
     CommandDef("provider", "查看可用供应商", "配置"),
+    CommandDef("gquota", "查看 Google Gemini Code Assist 配额使用情况", "信息"),
 
     CommandDef("personality", "设置人格模式", "配置",
                参数提示="[名称]"),
