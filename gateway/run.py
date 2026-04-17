@@ -4426,7 +4426,7 @@ class GatewayRunner:
         # Append a random tip to the reset message
         try:
             from hermes_cli.tips import get_random_tip
-            _tip_line = f"\n✦ Tip: {get_random_tip()}"
+            _tip_line = f"\n✦ 提示：{get_random_tip()}"
         except Exception:
             _tip_line = ""
 
