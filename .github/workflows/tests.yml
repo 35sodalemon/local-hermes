@@ -42,6 +42,9 @@ jobs:
           source .venv/bin/activate
           python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
         env:
+          # --- 添加下面这两行 ---
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
