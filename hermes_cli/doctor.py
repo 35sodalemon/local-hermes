@@ -148,7 +148,7 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         return
 
     print()
-    print(color("◆ Gateway Service", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 网关服务", Colors.CYAN, Colors.BOLD))
 
     linger_enabled, linger_detail = get_systemd_linger_status()
     if linger_enabled is True:
@@ -182,7 +182,7 @@ def run_doctor(args):
     # Check: Python version
     # =========================================================================
     print()
-    print(color("◆ Python Environment", Colors.CYAN, Colors.BOLD))
+    print(color("◆ Python 环境", Colors.CYAN, Colors.BOLD))
     
     py_version = sys.version_info
     if py_version >= (3, 11):
@@ -207,7 +207,7 @@ def run_doctor(args):
     # Check: Required packages
     # =========================================================================
     print()
-    print(color("◆ Required Packages", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 必需的包", Colors.CYAN, Colors.BOLD))
     
     required_packages = [
         ("openai", "OpenAI SDK"),
@@ -234,15 +234,15 @@ def run_doctor(args):
     for module, name in optional_packages:
         try:
             __import__(module)
-            check_ok(name, "(optional)")
+            check_ok(name, "（可选）")
         except ImportError:
-            check_warn(name, "(optional, not installed)")
+            check_warn(name, "(optional, 未安装)")
     
     # =========================================================================
     # Check: Configuration files
     # =========================================================================
     print()
-    print(color("◆ Configuration Files", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 配置文件", Colors.CYAN, Colors.BOLD))
     
     # Check ~/.hermes/.env (primary location for user config)
     env_path = HERMES_HOME / '.env'
@@ -289,10 +289,10 @@ def run_doctor(args):
                 check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
                 fixed_count += 1
             elif should_fix:
-                check_warn("config.yaml not found and no example to copy from")
+                check_warn("config.yaml 未找到 and no example to copy from")
                 manual_issues.append(f"Create {_DHH}/config.yaml manually")
             else:
-                check_warn("config.yaml not found", "(using defaults)")
+                check_warn("config.yaml 未找到", "（使用默认值）")
 
     # Check config version and stale keys
     config_path = HERMES_HOME / 'config.yaml'
@@ -311,7 +311,7 @@ def run_doctor(args):
                         check_ok("Config migrated to latest version")
                         fixed_count += 1
                     except Exception as mig_err:
-                        check_warn(f"Auto-migration failed: {mig_err}")
+                        check_warn(f"Auto-migration 失败: {mig_err}")
                         issues.append("Run 'hermes setup' to migrate config")
                 else:
                     issues.append("Run 'hermes doctor --fix' or 'hermes setup' to migrate config")
@@ -353,9 +353,9 @@ def run_doctor(args):
             config_issues = validate_config_structure()
             if config_issues:
                 print()
-                print(color("◆ Config Structure", Colors.CYAN, Colors.BOLD))
+                print(color("◆ 配置结构", Colors.CYAN, Colors.BOLD))
                 for ci in config_issues:
-                    if ci.severity == "error":
+                    if ci.severity == "错误":
                         check_fail(ci.message)
                     else:
                         check_warn(ci.message)
@@ -370,7 +370,7 @@ def run_doctor(args):
     # Check: Auth providers
     # =========================================================================
     print()
-    print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 认证提供者", Colors.CYAN, Colors.BOLD))
 
     try:
         from hermes_cli.auth import get_nous_auth_status, get_codex_auth_status
@@ -386,21 +386,21 @@ def run_doctor(args):
             check_ok("OpenAI Codex auth", "(logged in)")
         else:
             check_warn("OpenAI Codex auth", "(not logged in)")
-            if codex_status.get("error"):
-                check_info(codex_status["error"])
+            if codex_status.get("错误"):
+                check_info(codex_status["错误"])
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
 
     if shutil.which("codex"):
         check_ok("codex CLI")
     else:
-        check_warn("codex CLI not found", "(required for openai-codex login)")
+        check_warn("codex CLI 未找到", "(required for openai-codex login)")
 
     # =========================================================================
     # Check: Directory structure
     # =========================================================================
     print()
-    print(color("◆ Directory Structure", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 目录结构", Colors.CYAN, Colors.BOLD))
     
     hermes_home = HERMES_HOME
     if hermes_home.exists():
@@ -411,7 +411,7 @@ def run_doctor(args):
             check_ok(f"Created {_DHH} directory")
             fixed_count += 1
         else:
-            check_warn(f"{_DHH} not found", "(will be created on first use)")
+            check_warn(f"{_DHH} 未找到", "（首次使用时将创建）")
     
     # Check expected subdirectories
     expected_subdirs = ["cron", "sessions", "logs", "skills", "memories"]
@@ -425,7 +425,7 @@ def run_doctor(args):
                 check_ok(f"Created {_DHH}/{subdir_name}/")
                 fixed_count += 1
             else:
-                check_warn(f"{_DHH}/{subdir_name}/ not found", "(will be created on first use)")
+                check_warn(f"{_DHH}/{subdir_name}/ 未找到", "（首次使用时将创建）")
     
     # Check for SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
@@ -438,7 +438,7 @@ def run_doctor(args):
         else:
             check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
     else:
-        check_warn(f"{_DHH}/SOUL.md not found", "(create it to give Hermes a custom personality)")
+        check_warn(f"{_DHH}/SOUL.md 未找到", "（创建它以赋予 Hermes 自定义个性）")
         if should_fix:
             soul_path.parent.mkdir(parents=True, exist_ok=True)
             soul_path.write_text(
@@ -467,7 +467,7 @@ def run_doctor(args):
         else:
             check_info("USER.md not created yet (will be created when the agent first writes a memory)")
     else:
-        check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
+        check_warn(f"{_DHH}/memories/ 未找到", "（首次使用时将创建）")
         if should_fix:
             memories_dir.mkdir(parents=True, exist_ok=True)
             check_ok(f"Created {_DHH}/memories/")
@@ -520,7 +520,7 @@ def run_doctor(args):
     # =========================================================================
     if sys.platform != "win32":
         print()
-        print(color("◆ Command Installation", Colors.CYAN, Colors.BOLD))
+        print(color("◆ 命令安装", Colors.CYAN, Colors.BOLD))
 
         # Determine the venv entry point location
         _venv_bin = None
@@ -543,7 +543,7 @@ def run_doctor(args):
 
         if _venv_bin is None:
             check_warn(
-                "Venv entry point not found",
+                "Venv entry point 未找到",
                 "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')"
             )
             manual_issues.append(
@@ -575,7 +575,7 @@ def run_doctor(args):
                 check_ok(f"{_cmd_link_display}/hermes exists (non-symlink)")
             else:
                 check_fail(
-                    f"{_cmd_link_display}/hermes not found",
+                    f"{_cmd_link_display}/hermes 未找到",
                     "(hermes command may not work outside the venv)"
                 )
                 if should_fix:
@@ -599,22 +599,22 @@ def run_doctor(args):
     # Check: External tools
     # =========================================================================
     print()
-    print(color("◆ External Tools", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 外部工具", Colors.CYAN, Colors.BOLD))
     
     # Git
     if shutil.which("git"):
         check_ok("git")
     else:
-        check_warn("git not found", "(optional)")
+        check_warn("git 未找到", "（可选）")
     
     # ripgrep (optional, for faster file search)
     if shutil.which("rg"):
         check_ok("ripgrep (rg)", "(faster file search)")
     else:
-        check_warn("ripgrep (rg) not found", "(file search uses grep fallback)")
+        check_warn("ripgrep (rg) 未找到", "（文件搜索使用 grep 作为后备）")
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
     
-    # Docker (optional)
+    # Docker （可选）
     terminal_env = os.getenv("TERMINAL_ENV", "local")
     if terminal_env == "docker":
         if shutil.which("docker"):
@@ -629,16 +629,16 @@ def run_doctor(args):
                 check_fail("docker daemon not running")
                 issues.append("Start Docker daemon")
         else:
-            check_fail("docker not found", "(required for TERMINAL_ENV=docker)")
+            check_fail("docker 未找到", "（TERMINAL_ENV=docker 需要）")
             issues.append("Install Docker or change TERMINAL_ENV")
     else:
         if shutil.which("docker"):
-            check_ok("docker", "(optional)")
+            check_ok("docker", "（可选）")
         else:
             if _is_termux():
                 check_info("Docker backend is not available inside Termux (expected on Android)")
             else:
-                check_warn("docker not found", "(optional)")
+                check_warn("docker 未找到", "（可选）")
     
     # SSH (if using ssh backend)
     if terminal_env == "ssh":
@@ -675,7 +675,7 @@ def run_doctor(args):
             from daytona import Daytona  # noqa: F401 — SDK presence check
             check_ok("daytona SDK", "(installed)")
         except ImportError:
-            check_fail("daytona SDK not installed", "(pip install daytona)")
+            check_fail("daytona SDK 未安装", "（pip install daytona）")
             issues.append("Install daytona SDK: pip install daytona")
 
     # Node.js + agent-browser (for browser automation tools)
@@ -687,22 +687,22 @@ def run_doctor(args):
             check_ok("agent-browser (Node.js)", "(browser automation)")
         else:
             if _is_termux():
-                check_info("agent-browser is not installed (expected in the tested Termux path)")
+                check_info("agent-browser is 未安装 (expected in the tested Termux path)")
                 check_info("Install it manually later with: npm install -g agent-browser && agent-browser install")
                 check_info("Termux browser setup:")
                 for step in _termux_browser_setup_steps(node_installed=True):
                     check_info(step)
             else:
-                check_warn("agent-browser not installed", "(run: npm install)")
+                check_warn("agent-browser 未安装", "（运行：npm install）")
     else:
         if _is_termux():
-            check_info("Node.js not found (browser tools are optional in the tested Termux path)")
+            check_info("Node.js 未找到 (browser tools are optional in the tested Termux path)")
             check_info("Install Node.js on Termux with: pkg install nodejs")
             check_info("Termux browser setup:")
             for step in _termux_browser_setup_steps(node_installed=False):
                 check_info(step)
         else:
-            check_warn("Node.js not found", "(optional, needed for browser tools)")
+            check_warn("Node.js 未找到", "(optional, needed for browser tools)")
     
     # npm audit for all Node.js packages
     if shutil.which("npm"):
@@ -743,7 +743,7 @@ def run_doctor(args):
     # Check: API connectivity
     # =========================================================================
     print()
-    print(color("◆ API Connectivity", Colors.CYAN, Colors.BOLD))
+    print(color("◆ API 连接性", Colors.CYAN, Colors.BOLD))
     
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
@@ -889,7 +889,7 @@ def run_doctor(args):
     # Check: Submodules
     # =========================================================================
     print()
-    print(color("◆ Submodules", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 子模块", Colors.CYAN, Colors.BOLD))
     
     # tinker-atropos (RL training backend)
     tinker_dir = PROJECT_ROOT / "tinker-atropos"
@@ -900,18 +900,18 @@ def run_doctor(args):
                 check_ok("tinker-atropos", "(RL training backend)")
             except ImportError:
                 install_cmd = f"{_python_install_cmd()} -e ./tinker-atropos"
-                check_warn("tinker-atropos found but not installed", f"(run: {install_cmd})")
-                issues.append(f"Install tinker-atropos: {install_cmd}")
+                check_warn("tinker-atropos 已找到但未安装", f"（运行：{install_cmd}）")
+                issues.append(f"安装 tinker-atropos：{install_cmd}")
         else:
-            check_warn("tinker-atropos requires Python 3.11+", f"(current: {py_version.major}.{py_version.minor})")
+            check_warn("tinker-atropos 需要 Python 3.11+", f"（当前版本：{py_version.major}.{py_version.minor}）")
     else:
-        check_warn("tinker-atropos not found", "(run: git submodule update --init --recursive)")
+        check_warn("未找到 tinker-atropos", "（运行：git submodule update --init --recursive）")
     
     # =========================================================================
     # Check: Tool Availability
     # =========================================================================
     print()
-    print(color("◆ Tool Availability", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 工具可用性", Colors.CYAN, Colors.BOLD))
     
     try:
         # Add project root to path for imports
@@ -944,7 +944,7 @@ def run_doctor(args):
     # Check: Skills Hub
     # =========================================================================
     print()
-    print(color("◆ Skills Hub", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 技能中心", Colors.CYAN, Colors.BOLD))
 
     hub_dir = HERMES_HOME / "skills" / ".hub"
     if hub_dir.exists():
@@ -976,7 +976,7 @@ def run_doctor(args):
     # Memory Provider (only check the active provider, if any)
     # =========================================================================
     print()
-    print(color("◆ Memory Provider", Colors.CYAN, Colors.BOLD))
+    print(color("◆ 内存提供者", Colors.CYAN, Colors.BOLD))
 
     _active_memory_provider = ""
     try:
@@ -998,7 +998,7 @@ def run_doctor(args):
             _honcho_cfg_path = resolve_config_path()
 
             if not _honcho_cfg_path.exists():
-                check_warn("Honcho config not found", "run: hermes memory setup")
+                check_warn("Honcho config 未找到", "run: hermes memory setup")
             elif not hcfg.enabled:
                 check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
             elif not (hcfg.api_key or hcfg.base_url):
@@ -1014,13 +1014,13 @@ def run_doctor(args):
                         f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}",
                     )
                 except Exception as _e:
-                    check_fail("Honcho connection failed", str(_e))
+                    check_fail("Honcho connection 失败", str(_e))
                     issues.append(f"Honcho unreachable: {_e}")
         except ImportError:
-            check_fail("honcho-ai not installed", "pip install honcho-ai")
-            issues.append("Honcho is set as memory provider but honcho-ai is not installed")
+            check_fail("honcho-ai 未安装", "pip install honcho-ai")
+            issues.append("Honcho is set as memory provider but honcho-ai is 未安装")
         except Exception as _e:
-            check_warn("Honcho check failed", str(_e))
+            check_warn("Honcho check 失败", str(_e))
     elif _active_memory_provider == "mem0":
         try:
             from plugins.memory.mem0 import _load_config as _load_mem0_config
@@ -1034,9 +1034,9 @@ def run_doctor(args):
                 issues.append("Mem0 is set as memory provider but API key is missing")
         except ImportError:
             check_fail("Mem0 plugin not loadable", "pip install mem0ai")
-            issues.append("Mem0 is set as memory provider but mem0ai is not installed")
+            issues.append("Mem0 is set as memory provider but mem0ai is 未安装")
         except Exception as _e:
-            check_warn("Mem0 check failed", str(_e))
+            check_warn("Mem0 check 失败", str(_e))
     else:
         # Generic check for other memory providers (openviking, hindsight, etc.)
         try:
@@ -1047,9 +1047,9 @@ def run_doctor(args):
             elif _provider:
                 check_warn(f"{_active_memory_provider} configured but not available", "run: hermes memory status")
             else:
-                check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
+                check_warn(f"{_active_memory_provider} plugin 未找到", "run: hermes memory setup")
         except Exception as _e:
-            check_warn(f"{_active_memory_provider} check failed", str(_e))
+            check_warn(f"{_active_memory_provider} check 失败", str(_e))
 
     # =========================================================================
     # Profiles
@@ -1061,7 +1061,7 @@ def run_doctor(args):
         named_profiles = [p for p in list_profiles() if not p.is_default]
         if named_profiles:
             print()
-            print(color("◆ Profiles", Colors.CYAN, Colors.BOLD))
+            print(color("◆ 配置文件", Colors.CYAN, Colors.BOLD))
             check_ok(f"{len(named_profiles)} profile(s) found")
             wrapper_dir = _get_wrapper_dir()
             for p in named_profiles:

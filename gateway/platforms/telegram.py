@@ -1149,12 +1149,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
+                    InlineKeyboardButton("✅ 允许一次", callback_data=f"ea:once:{approval_id}"),
+                    InlineKeyboardButton("✅ 本次会话", callback_data=f"ea:session:{approval_id}"),
                 ],
                 [
-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
+                    InlineKeyboardButton("✅ 总是允许", callback_data=f"ea:always:{approval_id}"),
+                    InlineKeyboardButton("❌ 拒绝", callback_data=f"ea:deny:{approval_id}"),
                 ],
             ])
 
@@ -2298,7 +2298,7 @@ class TelegramAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        """Session-scoped key for text message batching."""
+        """本次会话-scoped key for text message batching."""
         from gateway.session import build_session_key
         return build_session_key(
             event.source,

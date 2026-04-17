@@ -559,7 +559,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if adapter_self._dedup.is_duplicate(str(message.id)):
                     return
 
-                # Always ignore our own messages
+                # 总是允许 ignore our own messages
                 if message.author == self._client.user:
                     return
 
@@ -655,6 +655,57 @@ class DiscordAdapter(BasePlatformAdapter):
             # Start the bot in background
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
 
+            # Attach a done callback to detect proxy/network failures gracefully.
+            # Without this, an unhandled exception in the bot task crashes the
+            # entire gateway process.  By marking the error as retryable we let
+            # the gateway's background reconnection loop (_failed_platforms)
+            # take over and reconnect automatically when the network recovers.
+            adapter_self_ref = self
+
+            def _on_bot_task_done(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    logger.info("[%s] Bot task was cancelled (normal shutdown)", adapter_self_ref.name)
+                    return
+                exc = task.exception()
+                if exc is None:
+                    return
+                # Classify the error
+                exc_name = type(exc).__name__
+                exc_msg = str(exc)
+                logger.warning(
+                    "[%s] Discord bot task crashed: %s: %s",
+                    adapter_self_ref.name, exc_name, exc_msg,
+                )
+                # Treat proxy / network errors as retryable so the gateway's
+                # background reconnection loop can reconnect automatically.
+                is_network = any(keyword in exc_msg.lower() for keyword in (
+                    "proxy", "connect", "timeout", "connection", "refused",
+                    "reset", "network", "dns", "resolve", "unreachable",
+                    "cannot connect",
+                ))
+                if is_network:
+                    adapter_self_ref._set_fatal_error(
+                        code="network_error",
+                        message=f"Discord connection lost (network/proxy): {exc_name}: {exc_msg}",
+                        retryable=True,
+                    )
+                else:
+                    adapter_self_ref._set_fatal_error(
+                        code="bot_task_error",
+                        message=f"Discord bot task error: {exc_name}: {exc_msg}",
+                        retryable=True,  # default retryable — most transient errors are
+                    )
+                # Notify the gateway so it can queue reconnection
+                if adapter_self_ref._fatal_error_handler:
+                    try:
+                        handler = adapter_self_ref._fatal_error_handler
+                        asyncio.get_running_loop().create_task(handler(adapter_self_ref))
+                    except RuntimeError:
+                        # Event loop may already be shutting down
+                        pass
+
+            self._bot_task.add_done_callback(_on_bot_task_done)
+
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
 
@@ -694,6 +745,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         self._running = False
         self._client = None
+        self._bot_task = None  # Release done callback closure
         self._ready_event.clear()
         self._post_connect_task = None
 
@@ -707,13 +759,21 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         try:
             synced = await asyncio.wait_for(self._client.tree.sync(), timeout=30)
-            logger.info("[%s] Synced %d slash command(s)", self.name, len(synced))
+            print(f"[Discord] Synced {len(synced)} slash command(s): {[c.name for c in synced]}", flush=True)
+            # List all registered commands on the tree
+            all_cmds = self._client.tree.get_commands()
+            for cmd in all_cmds:
+                if hasattr(cmd, '_children'):
+                    children = list(cmd._children.values())
+                    print(f"  /{cmd.name} -> {len(children)} sub-items: {[c.name for c in children]}", flush=True)
+                else:
+                    print(f"  /{cmd.name}", flush=True)
         except asyncio.TimeoutError:
-            logger.warning("[%s] Slash command sync timed out after 30s", self.name)
+            print(f"[Discord] Slash command sync timed out after 30s", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # pragma: no cover - defensive logging
-            logger.warning("[%s] Slash command sync failed: %s", self.name, e, exc_info=True)
+            print(f"[Discord] Slash command sync failed: {e}", flush=True)
 
     async def _add_reaction(self, message: Any, emoji: str) -> bool:
         """Add an emoji reaction to a Discord message."""
@@ -1337,7 +1397,7 @@ class DiscordAdapter(BasePlatformAdapter):
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-            async with aiohttp.ClientSession(**_sess_kw) as session:
+            async with aiohttp.Client本次会话(**_sess_kw) as session:
                 async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
                     if resp.status != 200:
                         raise Exception(f"Failed to download image: HTTP {resp.status}")
@@ -1409,7 +1469,7 @@ class DiscordAdapter(BasePlatformAdapter):
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-            async with aiohttp.ClientSession(**_sess_kw) as session:
+            async with aiohttp.Client本次会话(**_sess_kw) as session:
                 async with session.get(animation_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
                     if resp.status != 200:
                         raise Exception(f"Failed to download animation: HTTP {resp.status}")
@@ -1644,7 +1704,15 @@ class DiscordAdapter(BasePlatformAdapter):
         then cleans up the deferred response.  If *followup_msg* is provided
         the "thinking..." indicator is replaced with that text; otherwise it
         is deleted so the channel isn't cluttered.
+        
+        Also tracks skill usage for the skill display system.
         """
+        # Track skill usage if this is a skill command
+        if command_text.startswith("/skill "):
+            skill_key = command_text.split(" ")[1] if len(command_text.split(" ")) > 1 else None
+            if skill_key:
+                self._track_skill_usage(skill_key)
+        
         await interaction.response.defer(ephemeral=True)
         event = self._build_slash_event(interaction, command_text)
         await self.handle_message(event)
@@ -1655,6 +1723,33 @@ class DiscordAdapter(BasePlatformAdapter):
                 await interaction.delete_original_response()
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
+    
+    def _track_skill_usage(self, skill_key: str) -> None:
+        """Track skill usage by incrementing the counter in skill_usage.json."""
+        import json
+        from pathlib import Path
+        
+        usage_path = Path.home() / ".hermes" / "skill_usage.json"
+        
+        try:
+            # Load current usage data
+            usage_data = {}
+            if usage_path.exists():
+                with open(usage_path, 'r', encoding='utf-8') as f:
+                    usage_data = json.load(f)
+            
+            # Increment counter
+            current_count = usage_data.get(skill_key, 0)
+            usage_data[skill_key] = current_count + 1
+            
+            # Save updated data
+            with open(usage_path, 'w', encoding='utf-8') as f:
+                json.dump(usage_data, f, indent=2, ensure_ascii=False)
+            
+            logger.debug("Tracked usage for skill: %s (count: %d)", skill_key, current_count + 1)
+            
+        except Exception as e:
+            logger.warning("Failed to track skill usage for %s: %s", skill_key, e)
 
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
@@ -1669,7 +1764,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         @tree.command(name="reset", description="Reset your Hermes session")
         async def slash_reset(interaction: discord.Interaction):
-            await self._run_simple_slash(interaction, "/reset", "Session reset~")
+            await self._run_simple_slash(interaction, "/reset", "本次会话 reset~")
 
         @tree.command(name="model", description="Show or change the model")
         @discord.app_commands.describe(name="Model name (e.g. anthropic/claude-sonnet-4). Leave empty to see current.")
@@ -1711,12 +1806,12 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._run_simple_slash(interaction, "/compress")
 
         @tree.command(name="title", description="Set or show the session title")
-        @discord.app_commands.describe(name="Session title. Leave empty to show current.")
+        @discord.app_commands.describe(name="本次会话 title. Leave empty to show current.")
         async def slash_title(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/title {name}".strip())
 
         @tree.command(name="resume", description="Resume a previously-named session")
-        @discord.app_commands.describe(name="Session name to resume. Leave empty to list sessions.")
+        @discord.app_commands.describe(name="本次会话 name to resume. Leave empty to list sessions.")
         async def slash_resume(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/resume {name}".strip())
 
@@ -1767,7 +1862,7 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_approve(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/approve {scope}".strip())
 
-        @tree.command(name="deny", description="Deny a pending dangerous command")
+        @tree.command(name="deny", description="拒绝 a pending dangerous command")
         @discord.app_commands.describe(scope="Optional: 'all' to deny all pending commands")
         async def slash_deny(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/deny {scope}".strip())
@@ -1827,7 +1922,9 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Skip aliases that overlap with already-registered names
                 # (aliases for explicitly registered commands are handled above).
                 desc = (cmd_def.description or f"Run /{cmd_def.name}")[:100]
-                has_args = bool(cmd_def.args_hint)
+                # CommandDef uses Chinese field name 参数提示
+                _hint = getattr(cmd_def, '参数提示', '') or getattr(cmd_def, 'args_hint', '')
+                has_args = bool(_hint)
 
                 if has_args:
                     # Command takes optional arguments — create handler with
@@ -1841,7 +1938,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         _handler.__name__ = f"auto_slash_{_name.replace('-', '_')}"
                         return _handler
 
-                    handler = _make_args_handler(cmd_def.name, cmd_def.args_hint)
+                    handler = _make_args_handler(cmd_def.name, _hint)
                 else:
                     # Parameterless command.
                     def _make_simple_handler(_name: str):
@@ -1875,7 +1972,19 @@ class DiscordAdapter(BasePlatformAdapter):
         # Register skills under a single /skill command group with category
         # subcommand groups.  This uses 1 top-level slot instead of N,
         # supporting up to 25 categories × 25 skills = 625 skills.
+        logger.info("[Discord] 开始注册技能组")
         self._register_skill_group(tree)
+        logger.info("[Discord] 技能组注册完成")
+
+    @staticmethod
+    def _estimate_command_bytes(name: str, description: str) -> int:
+        """Rough byte estimate for a single command's Discord payload.
+
+        Based on the JSON Discord receives: name + description + fixed overhead
+        for type, id, options structure etc.
+        """
+        # Empirical: each command ≈ name bytes + description bytes + ~50 bytes overhead
+        return len(name.encode("utf-8")) + len(description.encode("utf-8")) + 80
 
     def _register_skill_group(self, tree) -> None:
         """Register a ``/skill`` command group with category subcommand groups.
@@ -1884,7 +1993,21 @@ class DiscordAdapter(BasePlatformAdapter):
         Each category becomes a subcommand group; root-level skills become
         direct subcommands.  Discord supports 25 subcommand groups × 25
         subcommands each = 625 skills — well beyond the old 100-command cap.
+
+        The total payload must stay under Discord's ~8 KB per-command-group
+        size limit.  Descriptions are progressively shortened to fit.
+        
+        New logic: Only show max_skills (default 20) skills:
+        - 10 default skills (user configurable)
+        - 10 most used skills (by usage count)
         """
+        import json as _json
+        import os
+        from pathlib import Path
+
+        # Discord's per-command-group size limit (bytes in the JSON payload)
+        _SIZE_BUDGET = 7500  # leave 500 B margin from the 8000 limit
+
         try:
             from hermes_cli.commands import discord_skill_commands_by_category
 
@@ -1894,17 +2017,309 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
-            categories, uncategorized, hidden = discord_skill_commands_by_category(
-                reserved_names=existing_names,
-            )
+            # ── Load skill display configuration ──
+            def _load_skill_display_config():
+                """Load skill display configuration from config.yaml."""
+                config_path = Path.home() / ".hermes" / "config.yaml"
+                default_config = {
+                    "max_skills": 20,
+                    "default_skills": [
+                        "hermes-weixin-setup",
+                        "github-pr-workflow",
+                        "clash-verge-direct-rules",
+                        "systematic-debugging",
+                        "hermes-cli-slow-startup",
+                        "discord-send-message",
+                        "hermes-webui",
+                        "hermes-discord-skill-size-limit",
+                        "fix-pytorch-cuda-libs",
+                        "webhook-subscriptions"
+                    ]
+                }
+                
+                try:
+                    if config_path.exists():
+                        import yaml
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            config = yaml.safe_load(f)
+                            discord_config = config.get("discord", {})
+                            skill_display = discord_config.get("skill_display", {})
+                            return {
+                                "max_skills": skill_display.get("max_skills", 20),
+                                "default_skills": skill_display.get("default_skills", default_config["default_skills"])
+                            }
+                except Exception:
+                    pass
+                
+                return default_config
 
+            # ── Load skill usage statistics ──
+            def _load_skill_usage():
+                """Load skill usage statistics from skill_usage.json."""
+                usage_path = Path.home() / ".hermes" / "skill_usage.json"
+                try:
+                    if usage_path.exists():
+                        with open(usage_path, 'r', encoding='utf-8') as f:
+                            return _json.load(f)
+                except Exception:
+                    pass
+                return {}
+
+            # ── Load skill Chinese description from SKILL.md ──
+            def _load_skill_zh_description(skill_key: str) -> str:
+                """Load Chinese description from SKILL.md file.
+                
+                skill_key may have leading '/' — strip it for path lookup.
+                """
+                # Strip leading / for path matching
+                bare_key = skill_key.lstrip("/")
+                skill_dir = Path.home() / ".hermes" / "skills"
+                
+                # Search for skill in subdirectories
+                for category_dir in skill_dir.iterdir():
+                    if category_dir.is_dir():
+                        skill_path = category_dir / bare_key / "SKILL.md"
+                        if skill_path.exists():
+                            try:
+                                with open(skill_path, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                                    
+                                # Parse frontmatter
+                                if content.startswith('---'):
+                                    end_idx = content.find('---', 3)
+                                    if end_idx != -1:
+                                        frontmatter = content[3:end_idx].strip()
+                                        # Simple YAML parsing for description_zh
+                                        for line in frontmatter.split('\n'):
+                                            if line.startswith('description_zh:'):
+                                                desc_zh = line[15:].strip()
+                                                return desc_zh
+                                            # Also check for Chinese in description field
+                                            elif line.startswith('description:'):
+                                                desc = line[12:].strip()
+                                                if any('\u4e00' <= char <= '\u9fff' for char in desc):
+                                                    return desc
+                            except Exception:
+                                pass
+                
+                return None
+
+            # ── Filter skills based on configuration ──
+            def _filter_skills(categories, uncategorized, max_skills, default_skills, usage_stats):
+                """Filter skills to show only default + most used.
+
+                Priority order:
+                1. Default skills (user-configured) — always shown first
+                2. Most-used skills (by usage_stats) — fills remaining slots
+                3. Round-robin fallback (when no usage data) — category diversity
+
+                Per-category cap prevents one large category (e.g. devops with 17
+                skills) from dominating the list.  The cap is dynamic:
+                    min(3, ceil(remaining_slots * 0.3))
+                so a category contributes at most 30% of non-default slots (min 1,
+                max 3).
+                """
+                all_skills = {}  # bare_key -> (discord_name, description, category, cmd_key)
+                for cat_name, skills in categories.items():
+                    for discord_name, description, cmd_key in skills:
+                        bare_key = cmd_key.lstrip("/")
+                        all_skills[bare_key] = (discord_name, description, cat_name, cmd_key)
+                for discord_name, description, cmd_key in uncategorized:
+                    bare_key = cmd_key.lstrip("/")
+                    all_skills[bare_key] = (discord_name, description, None, cmd_key)
+
+                selected_bare = []
+                selected_set = set()
+
+                # ── Phase 1: Default skills (always first) ──
+                for skill_key in default_skills:
+                    if skill_key in all_skills and skill_key not in selected_set:
+                        selected_bare.append(skill_key)
+                        selected_set.add(skill_key)
+                        if len(selected_bare) >= max_skills:
+                            break
+
+                # ── Phase 2: Fill remaining slots ──
+                remaining = max_skills - len(selected_bare)
+                if remaining > 0:
+                    # Group remaining skills by category
+                    cat_remaining = {}  # category -> [bare_keys]
+                    no_cat_remaining = []
+                    for key in all_skills:
+                        if key in selected_set:
+                            continue
+                        _, _, category, _ = all_skills[key]
+                        if category:
+                            cat_remaining.setdefault(category, []).append(key)
+                        else:
+                            no_cat_remaining.append(key)
+
+                    has_usage = bool(usage_stats)
+
+                    if has_usage:
+                        # Sort remaining by usage count (desc), then alphabetically
+                        # Pick from a global sorted pool with per-category caps
+                        all_remaining = []
+                        for key in all_skills:
+                            if key not in selected_set:
+                                all_remaining.append(key)
+                        all_remaining.sort(
+                            key=lambda k: (usage_stats.get(k, 0), k),
+                            reverse=True  # highest usage first; ties broken alphabetically by negative key
+                        )
+                        # Rewrite sort: we want desc by usage, asc by name for ties
+                        all_remaining.sort(
+                            key=lambda k: (-usage_stats.get(k, 0), k)
+                        )
+
+                        cat_count = {}  # category -> how many picked in phase 2
+                        cat_cap = max(1, min(3, (remaining + 2) // 3))
+                        for key in all_remaining:
+                            if len(selected_bare) >= max_skills:
+                                break
+                            _, _, category, _ = all_skills[key]
+                            if category:
+                                cur = cat_count.get(category, 0)
+                                if cur >= cat_cap:
+                                    continue
+                                cat_count[category] = cur + 1
+                            selected_bare.append(key)
+                            selected_set.add(key)
+                    else:
+                        # No usage data — round-robin across categories for diversity
+                        for cat in cat_remaining:
+                            cat_remaining[cat].sort()  # alphabetical within category
+                        cat_names = sorted(cat_remaining.keys())
+                        cat_count = {}
+                        cat_cap = max(1, min(3, (remaining + 2) // 3))
+                        added = True
+                        while added and len(selected_bare) < max_skills:
+                            added = False
+                            for cat in cat_names:
+                                if len(selected_bare) >= max_skills:
+                                    break
+                                if not cat_remaining[cat]:
+                                    continue
+                                cur = cat_count.get(cat, 0)
+                                if cur >= cat_cap:
+                                    continue
+                                skill_key = cat_remaining[cat].pop(0)
+                                selected_bare.append(skill_key)
+                                selected_set.add(skill_key)
+                                cat_count[cat] = cur + 1
+                                added = True
+
+                    # Fill any leftover slots with uncategorized skills
+                    for skill_key in no_cat_remaining:
+                        if len(selected_bare) >= max_skills:
+                            break
+                        if skill_key not in selected_set:
+                            selected_bare.append(skill_key)
+                            selected_set.add(skill_key)
+
+                # Rebuild categories and uncategorized with only selected skills
+                filtered_categories = {}
+                filtered_uncategorized = []
+
+                logger.info(
+                    "[%s] _filter_skills: selected %d/%d skills",
+                    self.name, len(selected_bare), len(all_skills),
+                )
+                for bare_key in selected_bare:
+                    discord_name, description, category, cmd_key = all_skills[bare_key]
+                    logger.debug("  -> %s (cat=%s)", bare_key, category)
+                    if category:
+                        filtered_categories.setdefault(category, []).append(
+                            (discord_name, description, cmd_key))
+                    else:
+                        filtered_uncategorized.append((discord_name, description, cmd_key))
+
+                hidden_count = len(all_skills) - len(selected_bare)
+                return filtered_categories, filtered_uncategorized, hidden_count
+
+            # 获取所有技能（不经过discord_skill_commands_by_category的过滤）
+            def _get_all_skills():
+                """Get all skills without Discord group limits."""
+                from pathlib import Path as _P
+                from tools.skills_tool import SKILLS_DIR
+                
+                _skills_dir = SKILLS_DIR.resolve()
+                _hub_dir = (SKILLS_DIR / ".hub").resolve()
+                
+                all_categories = {}
+                all_uncategorized = []
+                
+                try:
+                    from agent.skill_commands import get_skill_commands
+                    skill_cmds = get_skill_commands()
+                    
+                    for cmd_key in sorted(skill_cmds):
+                        info = skill_cmds[cmd_key]
+                        skill_path = info.get("skill_md_path", "")
+                        if not skill_path:
+                            continue
+                        sp = _P(skill_path).resolve()
+                        
+                        # Skip skills outside SKILLS_DIR or from the hub
+                        if not str(sp).startswith(str(_skills_dir)):
+                            continue
+                        if str(sp).startswith(str(_hub_dir)):
+                            continue
+                        
+                        skill_name = info.get("name", "")
+                        raw_name = cmd_key.lstrip("/")
+                        # Clamp to 32 chars (Discord limit)
+                        discord_name = raw_name[:32]
+                        
+                        # 尝试加载中文描述
+                        desc = _load_skill_zh_description(cmd_key)
+                        if not desc:
+                            # 如果没有中文描述，使用英文描述
+                            desc = info.get("description", "")
+                        
+                        if len(desc) > 100:
+                            desc = desc[:97] + "..."
+                        
+                        # Determine category from the relative path within SKILLS_DIR
+                        try:
+                            rel = sp.parent.relative_to(_skills_dir)
+                        except ValueError:
+                            continue
+                        parts = rel.parts
+                        if len(parts) >= 2:
+                            cat = parts[0]
+                            all_categories.setdefault(cat, []).append((discord_name, desc, cmd_key))
+                        else:
+                            all_uncategorized.append((discord_name, desc, cmd_key))
+                except Exception:
+                    pass
+                
+                return all_categories, all_uncategorized
+            
+            # 获取所有技能
+            categories, uncategorized = _get_all_skills()
+            
             if not categories and not uncategorized:
                 return
-
-            skill_group = discord.app_commands.Group(
-                name="skill",
-                description="Run a Hermes skill",
+            
+            _total_before = sum(len(v) for v in categories.values()) + len(uncategorized)
+            logger.info("[%s] 获取所有技能: total=%d, categorized=%d, uncategorized=%d", self.name, _total_before, sum(len(v) for v in categories.values()), len(uncategorized))
+            
+            # Load configuration and usage statistics
+            skill_config = _load_skill_display_config()
+            usage_stats = _load_skill_usage()
+            max_skills = skill_config["max_skills"]
+            default_skills = skill_config["default_skills"]
+            
+            logger.info("[%s] 技能显示配置: max_skills=%d, default_skills=%d, usage_entries=%d", self.name, max_skills, len(default_skills), len(usage_stats))
+            
+            # Filter skills
+            categories, uncategorized, hidden = _filter_skills(
+                categories, uncategorized, max_skills, default_skills, usage_stats
             )
+            
+            _total_after = sum(len(v) for v in categories.values()) + len(uncategorized)
+            logger.info("[%s] 筛选后: total=%d, hidden_by_filter=%d", self.name, _total_after, hidden)
 
             # ── Helper: build a callback for a skill command key ──
             def _make_handler(_key: str):
@@ -1914,46 +2329,90 @@ class DiscordAdapter(BasePlatformAdapter):
                 _handler.__name__ = f"skill_{_key.lstrip('/').replace('-', '_')}"
                 return _handler
 
-            # ── Uncategorized (root-level) skills → direct subcommands ──
-            for discord_name, description, cmd_key in uncategorized:
-                cmd = discord.app_commands.Command(
-                    name=discord_name,
-                    description=description or f"Run the {discord_name} skill",
-                    callback=_make_handler(cmd_key),
-                )
-                skill_group.add_command(cmd)
+            # ── Helper: measure actual JSON payload size ──
+            def _measure_group(skill_group) -> int:
+                payload = skill_group.to_dict(tree)
+                return len(_json.dumps(payload).encode("utf-8"))
 
-            # ── Category subcommand groups ──
-            for cat_name in sorted(categories):
-                cat_desc = f"{cat_name.replace('-', ' ').title()} skills"
-                if len(cat_desc) > 100:
-                    cat_desc = cat_desc[:97] + "..."
-                cat_group = discord.app_commands.Group(
-                    name=cat_name,
-                    description=cat_desc,
-                    parent=skill_group,
-                )
-                for discord_name, description, cmd_key in categories[cat_name]:
-                    cmd = discord.app_commands.Command(
-                        name=discord_name,
-                        description=description or f"Run the {discord_name} skill",
-                        callback=_make_handler(cmd_key),
+            # ── Build flat command group (no category subgroups) ──
+            def _build_and_fit():
+                """Build flat /skill group with all skills as direct subcommands.
+                
+                No category nesting — every skill is a direct child of /skill.
+                This gives a cleaner Discord UX: type /skill and see all skills immediately.
+                """
+                nonlocal hidden
+
+                # Flatten all skills into one list
+                all_entries = []  # [(discord_name, description, cmd_key)]
+                for discord_name, description, cmd_key in uncategorized:
+                    all_entries.append((discord_name, description, cmd_key))
+                for cat_name in sorted(categories):
+                    all_entries.extend(categories[cat_name])
+
+                # Try building with current descriptions
+                for attempt in range(3):
+                    grp = discord.app_commands.Group(
+                        name="skill",
+                        description="Run a Hermes skill",
                     )
-                    cat_group.add_command(cmd)
 
+                    for discord_name, description, cmd_key in all_entries:
+                        cmd = discord.app_commands.Command(
+                            name=discord_name,
+                            description=description or f"Run the {discord_name} skill",
+                            callback=_make_handler(cmd_key),
+                        )
+                        grp.add_command(cmd)
+
+                    size = _measure_group(grp)
+                    if size <= _SIZE_BUDGET:
+                        return grp, len(all_entries), hidden, size
+
+                    # Need to shrink — progressively shorten descriptions
+                    if attempt == 0:
+                        for i, (n, d, k) in enumerate(all_entries):
+                            if len(d) > 50:
+                                all_entries[i] = (n, d[:47] + "...", k)
+                    elif attempt == 1:
+                        for i, (n, d, k) in enumerate(all_entries):
+                            if len(d) > 25:
+                                all_entries[i] = (n, d[:22] + "...", k)
+
+                # Still too large — drop skills from the end one by one
+                while all_entries:
+                    all_entries.pop()
+                    hidden += 1
+
+                    grp = discord.app_commands.Group(
+                        name="skill",
+                        description="Run a Hermes skill",
+                    )
+                    for discord_name, description, cmd_key in all_entries:
+                        cmd = discord.app_commands.Command(
+                            name=discord_name,
+                            description=description or f"Run the {discord_name} skill",
+                            callback=_make_handler(cmd_key),
+                        )
+                        grp.add_command(cmd)
+
+                    size = _measure_group(grp)
+                    if size <= _SIZE_BUDGET:
+                        return grp, len(all_entries), hidden, size
+
+                return None  # can't fit anything
+
+            result = _build_and_fit()
+            if result is None:
+                logger.warning("[%s] Cannot fit /skill group in Discord 8KB limit", self.name)
+                return
+
+            skill_group, total, hidden, payload_size = result
             tree.add_command(skill_group)
 
-            total = sum(len(v) for v in categories.values()) + len(uncategorized)
-            logger.info(
-                "[%s] Registered /skill group: %d skill(s) across %d categories"
-                " + %d uncategorized",
-                self.name, total, len(categories), len(uncategorized),
-            )
+            logger.info("[%s] Registered /skill group: %d flat skill(s) (payload %d bytes)", self.name, total, payload_size)
             if hidden:
-                logger.warning(
-                    "[%s] %d skill(s) not registered (Discord subcommand limits)",
-                    self.name, hidden,
-                )
+                logger.info("[%s] %d skill(s) not shown (filtered + size limit)", self.name, hidden)
         except Exception as exc:
             logger.warning("[%s] Failed to register /skill group: %s", self.name, exc)
 
@@ -2616,7 +3075,7 @@ class DiscordAdapter(BasePlatformAdapter):
                             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
                             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
                             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-                            async with aiohttp.ClientSession(**_sess_kw) as session:
+                            async with aiohttp.Client本次会话(**_sess_kw) as session:
                                 async with session.get(
                                     att.url,
                                     timeout=aiohttp.ClientTimeout(total=30),
@@ -2706,7 +3165,7 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        """Session-scoped key for text message batching."""
+        """本次会话-scoped key for text message batching."""
         from gateway.session import build_session_key
         return build_session_key(
             event.source,
@@ -2780,7 +3239,7 @@ if DISCORD_AVAILABLE:
         """
         Interactive button view for exec approval of dangerous commands.
 
-        Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
+        Shows four buttons: 允许一次, Allow 本次会话, 总是允许 Allow, 拒绝.
         Clicking a button calls ``resolve_gateway_approval()`` to unblock the
         waiting agent thread — the same mechanism as the text ``/approve`` flow.
         Only users in the allowed list can click.  Times out after 5 minutes.
@@ -2840,25 +3299,25 @@ if DISCORD_AVAILABLE:
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from button: %s", exc)
 
-        @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="允许一次", style=discord.ButtonStyle.green)
         async def allow_once(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
 
-        @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
+        @discord.ui.button(label="Allow 本次会话", style=discord.ButtonStyle.grey)
         async def allow_session(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
 
-        @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
+        @discord.ui.button(label="总是允许 Allow", style=discord.ButtonStyle.blurple)
         async def allow_always(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
 
-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="拒绝", style=discord.ButtonStyle.red)
         async def deny(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):

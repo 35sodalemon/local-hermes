@@ -970,7 +970,7 @@ class SlackAdapter(BasePlatformAdapter):
                 if self._bot_user_id and f"<@{self._bot_user_id}>" not in text_check:
                     return
             # "all" falls through to process the message
-            # Always ignore our own messages to prevent echo loops
+            # 总是允许 ignore our own messages to prevent echo loops
             msg_user = event.get("user", "")
             if msg_user and self._bot_user_id and msg_user == self._bot_user_id:
                 return
@@ -1253,26 +1253,26 @@ class SlackAdapter(BasePlatformAdapter):
                     "elements": [
                         {
                             "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Once"},
+                            "text": {"type": "plain_text", "text": "允许一次"},
                             "style": "primary",
                             "action_id": "hermes_approve_once",
                             "value": session_key,
                         },
                         {
                             "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Session"},
+                            "text": {"type": "plain_text", "text": "Allow 本次会话"},
                             "action_id": "hermes_approve_session",
                             "value": session_key,
                         },
                         {
                             "type": "button",
-                            "text": {"type": "plain_text", "text": "Always Allow"},
+                            "text": {"type": "plain_text", "text": "总是允许 Allow"},
                             "action_id": "hermes_approve_always",
                             "value": session_key,
                         },
                         {
                             "type": "button",
-                            "text": {"type": "plain_text", "text": "Deny"},
+                            "text": {"type": "plain_text", "text": "拒绝"},
                             "style": "danger",
                             "action_id": "hermes_deny",
                             "value": session_key,
@@ -1565,9 +1565,9 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         try:
-            from gateway.session import SessionSource, build_session_key
+            from gateway.session import 本次会话Source, build_session_key
 
-            source = SessionSource(
+            source = 本次会话Source(
                 platform=Platform.SLACK,
                 chat_id=channel_id,
                 chat_type="group",

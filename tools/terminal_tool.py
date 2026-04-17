@@ -1314,11 +1314,11 @@ def terminal_tool(
                 }, ensure_ascii=False)
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command required approval ({desc}) and was approved by the user."
+                desc = approval.get("description", "被标记为危险")
+                approval_note = f"命令需要审批（{desc}）且已由用户批准。"
             elif approval.get("smart_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
+                desc = approval.get("description", "被标记为危险")
+                approval_note = f"命令被标记（{desc}）且已由智能审批自动批准。"
 
         # Validate workdir against shell injection
         if workdir:

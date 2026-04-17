@@ -43,12 +43,12 @@ class CommandDef:
 
     name: str                          # canonical name without slash: "background"
     description: str                   # human-readable description
-    category: str                      # "Session", "Configuration", etc.
+    category: str                      # "会话", "Configuration", etc.
     aliases: tuple[str, ...] = ()      # alternative names: ("bg",)
-    args_hint: str = ""                # argument placeholder: "<prompt>", "[name]"
+    参数提示: str = ""                # argument placeholder: "<prompt>", "[name]"
     subcommands: tuple[str, ...] = ()  # tab-completable subcommands
     cli_only: bool = False             # only available in CLI
-    gateway_only: bool = False         # only available in gateway/messaging
+    仅网关: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
 
 
@@ -57,113 +57,111 @@ class CommandDef:
 # ---------------------------------------------------------------------------
 
 COMMAND_REGISTRY: list[CommandDef] = [
-    # Session
-    CommandDef("new", "Start a new session (fresh session ID + history)", "Session",
+    # 会话
+    CommandDef("new", "重置会话，开始新对话", "会话",
                aliases=("reset",)),
-    CommandDef("clear", "Clear screen and start a new session", "Session",
+    CommandDef("clear", "清屏并开始新会话", "会话",
                cli_only=True),
-    CommandDef("history", "Show conversation history", "Session",
+    CommandDef("history", "查看对话历史", "会话",
                cli_only=True),
-    CommandDef("save", "Save the current conversation", "Session",
+    CommandDef("save", "保存当前对话", "会话",
                cli_only=True),
-    CommandDef("retry", "Retry the last message (resend to agent)", "Session"),
-    CommandDef("undo", "Remove the last user/assistant exchange", "Session"),
-    CommandDef("title", "Set a title for the current session", "Session",
-               args_hint="[name]"),
-    CommandDef("branch", "Branch the current session (explore a different path)", "Session",
-               aliases=("fork",), args_hint="[name]"),
-    CommandDef("compress", "Manually compress conversation context", "Session",
-               args_hint="[focus topic]"),
-    CommandDef("rollback", "List or restore filesystem checkpoints", "Session",
-               args_hint="[number]"),
-    CommandDef("snapshot", "Create or restore state snapshots of Hermes config/state", "Session",
-               aliases=("snap",), args_hint="[create|restore <id>|prune]"),
-    CommandDef("stop", "Kill all running background processes", "Session"),
-    CommandDef("approve", "Approve a pending dangerous command", "Session",
-               gateway_only=True, args_hint="[session|always]"),
-    CommandDef("deny", "Deny a pending dangerous command", "Session",
-               gateway_only=True),
-    CommandDef("background", "Run a prompt in the background", "Session",
-               aliases=("bg",), args_hint="<prompt>"),
-    CommandDef("btw", "Ephemeral side question using session context (no tools, not persisted)", "Session",
-               args_hint="<question>"),
-    CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
-               aliases=("q",), args_hint="<prompt>"),
-    CommandDef("status", "Show session info", "Session"),
-    CommandDef("profile", "Show active profile name and home directory", "Info"),
-    CommandDef("sethome", "Set this chat as the home channel", "Session",
-               gateway_only=True, aliases=("set-home",)),
-    CommandDef("resume", "Resume a previously-named session", "Session",
-               args_hint="[name]"),
+    CommandDef("retry", "重试上一条消息", "会话"),
+    CommandDef("undo", "撤回最后一轮对话", "会话"),
+    CommandDef("title", "设置会话标题", "会话",
+               参数提示="[名称]"),
+    CommandDef("branch", "分叉当前会话", "会话",
+               aliases=("fork",), 参数提示="[名称]"),
+    CommandDef("compress", "压缩对话上下文", "会话",
+               参数提示="[主题关键词]"),
+    CommandDef("rollback", "查看/恢复文件检查点", "会话",
+               参数提示="[序号]"),
+    CommandDef("snapshot", "创建或恢复配置快照", "会话",
+               aliases=("snap",), 参数提示="[create|restore <id>|prune]"),
+    CommandDef("stop", "终止所有后台进程", "会话"),
+    CommandDef("approve", "批准待审危险命令", "会话",
+               仅网关=True, 参数提示="[session|always]"),
+    CommandDef("deny", "拒绝待审危险命令", "会话",
+               仅网关=True),
+    CommandDef("background", "后台运行提示", "会话",
+               aliases=("bg",), 参数提示="<提示>"),
+    CommandDef("btw", "临时旁问（无工具，不存历史）", "会话",
+               参数提示="<问题>"),
+    CommandDef("queue", "排队提示，不打断当前对话", "会话",
+               aliases=("q",), 参数提示="<提示>"),
+    CommandDef("status", "显示会话信息", "会话"),
+    CommandDef("profile", "显示当前配置和主目录", "信息"),
+    CommandDef("sethome", "设为家频道", "会话",
+               仅网关=True, aliases=("set-home",)),
+    CommandDef("resume", "恢复之前的会话", "会话",
+               参数提示="[名称]"),
 
-    # Configuration
-    CommandDef("config", "Show current configuration", "Configuration",
+    # 配置
+    CommandDef("config", "显示当前配置", "配置",
                cli_only=True),
-    CommandDef("model", "Switch model for this session", "Configuration", args_hint="[model] [--global]"),
-    CommandDef("provider", "Show available providers and current provider",
-               "Configuration"),
+    CommandDef("model", "切换模型", "配置", 参数提示="[模型] [--global]"),
+    CommandDef("provider", "查看可用供应商", "配置"),
 
-    CommandDef("personality", "Set a predefined personality", "Configuration",
-               args_hint="[name]"),
-    CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",
+    CommandDef("personality", "设置人格模式", "配置",
+               参数提示="[名称]"),
+    CommandDef("statusbar", "切换状态栏显示", "配置",
                cli_only=True, aliases=("sb",)),
-    CommandDef("verbose", "Cycle tool progress display: off -> new -> all -> verbose",
-               "Configuration", cli_only=True,
+    CommandDef("verbose", "切换工具进度显示", "配置",
+               cli_only=True,
                gateway_config_gate="display.tool_progress_command"),
-    CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
-               "Configuration"),
-    CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",
-               args_hint="[level|show|hide]",
+    CommandDef("yolo", "切换YOLO模式（跳过审批）", "配置"),
+    CommandDef("reasoning", "调整推理强度", "配置",
+               参数提示="[level|show|hide]",
                subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "show", "hide", "on", "off")),
-    CommandDef("fast", "Toggle fast mode — OpenAI Priority Processing / Anthropic Fast Mode (Normal/Fast)", "Configuration",
-               args_hint="[normal|fast|status]",
+    CommandDef("fast", "切换快速模式", "配置",
+               参数提示="[normal|fast|status]",
                subcommands=("normal", "fast", "status", "on", "off")),
-    CommandDef("skin", "Show or change the display skin/theme", "Configuration",
-               cli_only=True, args_hint="[name]"),
-    CommandDef("voice", "Toggle voice mode", "Configuration",
-               args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
+    CommandDef("skin", "切换CLI主题/皮肤", "配置",
+               cli_only=True, 参数提示="[名称]"),
+    CommandDef("voice", "切换语音模式", "配置",
+               参数提示="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
 
-    # Tools & Skills
-    CommandDef("tools", "Manage tools: /tools [list|disable|enable] [name...]", "Tools & Skills",
-               args_hint="[list|disable|enable] [name...]", cli_only=True),
-    CommandDef("toolsets", "List available toolsets", "Tools & Skills",
+    # 工具与技能
+    CommandDef("tools", "管理工具（列表/启用/禁用）", "工具与技能",
+               参数提示="[list|disable|enable] [名称...]", cli_only=True),
+    CommandDef("toolsets", "列出可用工具集", "工具与技能",
                cli_only=True),
-    CommandDef("skills", "Search, install, inspect, or manage skills",
-               "Tools & Skills", cli_only=True,
+    CommandDef("skills", "搜索/安装/管理技能", "工具与技能",
+               cli_only=True,
                subcommands=("search", "browse", "inspect", "install")),
-    CommandDef("cron", "Manage scheduled tasks", "Tools & Skills",
-               cli_only=True, args_hint="[subcommand]",
+    CommandDef("cron", "管理定时任务", "工具与技能",
+               cli_only=True, 参数提示="[子命令]",
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
-    CommandDef("reload", "Reload .env variables into the running session", "Tools & Skills"),
-    CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
+    CommandDef("reload", "重载.env环境变量", "工具与技能"),
+    CommandDef("reload-mcp", "重载MCP服务器", "工具与技能",
                aliases=("reload_mcp",)),
-    CommandDef("browser", "Connect browser tools to your live Chrome via CDP", "Tools & Skills",
-               cli_only=True, args_hint="[connect|disconnect|status]",
+    CommandDef("browser", "连接Chrome浏览器", "工具与技能",
+               cli_only=True, 参数提示="[connect|disconnect|status]",
                subcommands=("connect", "disconnect", "status")),
-    CommandDef("plugins", "List installed plugins and their status",
-               "Tools & Skills", cli_only=True),
-
-    # Info
-    CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
-               gateway_only=True, args_hint="[page]"),
-    CommandDef("help", "Show available commands", "Info"),
-    CommandDef("restart", "Gracefully restart the gateway after draining active runs", "Session",
-               gateway_only=True),
-    CommandDef("usage", "Show token usage and rate limits for the current session", "Info"),
-    CommandDef("insights", "Show usage insights and analytics", "Info",
-               args_hint="[days]"),
-    CommandDef("platforms", "Show gateway/messaging platform status", "Info",
-               cli_only=True, aliases=("gateway",)),
-    CommandDef("paste", "Check clipboard for an image and attach it", "Info",
+    CommandDef("plugins", "列出已安装插件", "工具与技能",
                cli_only=True),
-    CommandDef("image", "Attach a local image file for your next prompt", "Info",
-               cli_only=True, args_hint="<path>"),
-    CommandDef("update", "Update Hermes Agent to the latest version", "Info",
-               gateway_only=True),
-    CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info"),
 
-    # Exit
-    CommandDef("quit", "Exit the CLI", "Exit",
+    # 信息
+    CommandDef("commands", "浏览所有命令（分页）", "信息",
+               仅网关=True, 参数提示="[页码]"),
+    CommandDef("help", "显示帮助", "信息"),
+    CommandDef("restart", "优雅重启网关", "会话",
+               仅网关=True),
+    CommandDef("usage", "查看Token用量和限速", "信息"),
+    CommandDef("insights", "用量分析", "信息",
+               参数提示="[天数]"),
+    CommandDef("platforms", "网关/平台状态", "信息",
+               cli_only=True, aliases=("gateway",)),
+    CommandDef("paste", "附加剪贴板图片", "信息",
+               cli_only=True),
+    CommandDef("image", "附加本地图片", "信息",
+               cli_only=True, 参数提示="<路径>"),
+    CommandDef("update", "更新到最新版本", "信息",
+               仅网关=True),
+    CommandDef("debug", "上传调试报告并获取链接", "信息"),
+
+    # 退出
+    CommandDef("quit", "退出CLI", "退出",
                cli_only=True, aliases=("exit",)),
 ]
 
@@ -195,15 +193,15 @@ def resolve_command(name: str) -> CommandDef | None:
 
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
-    if cmd.args_hint:
-        return f"{cmd.description} (usage: /{cmd.name} {cmd.args_hint})"
+    if cmd.参数提示:
+        return f"{cmd.description} (usage: /{cmd.name} {cmd.参数提示})"
     return cmd.description
 
 
 # Backwards-compatible flat dict: "/command" -> description
 COMMANDS: dict[str, str] = {}
 for _cmd in COMMAND_REGISTRY:
-    if not _cmd.gateway_only:
+    if not _cmd.仅网关:
         COMMANDS[f"/{_cmd.name}"] = _build_description(_cmd)
         for _alias in _cmd.aliases:
             COMMANDS[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
@@ -211,7 +209,7 @@ for _cmd in COMMAND_REGISTRY:
 # Backwards-compatible categorized dict
 COMMANDS_BY_CATEGORY: dict[str, dict[str, str]] = {}
 for _cmd in COMMAND_REGISTRY:
-    if not _cmd.gateway_only:
+    if not _cmd.仅网关:
         _cat = COMMANDS_BY_CATEGORY.setdefault(_cmd.category, {})
         _cat[f"/{_cmd.name}"] = COMMANDS[f"/{_cmd.name}"]
         for _alias in _cmd.aliases:
@@ -224,16 +222,16 @@ for _cmd in COMMAND_REGISTRY:
     if _cmd.subcommands:
         SUBCOMMANDS[f"/{_cmd.name}"] = list(_cmd.subcommands)
 
-# Also extract subcommands hinted in args_hint via pipe-separated patterns
-# e.g. args_hint="[on|off|tts|status]" for commands that don't have explicit subcommands.
+# Also extract subcommands hinted in 参数提示 via pipe-separated patterns
+# e.g. 参数提示="[on|off|tts|status]" for commands that don't have explicit subcommands.
 # NOTE: If a command already has explicit subcommands, this fallback is skipped.
 # Use the `subcommands` field on CommandDef for intentional tab-completable args.
 _PIPE_SUBS_RE = re.compile(r"[a-z]+(?:\|[a-z]+)+")
 for _cmd in COMMAND_REGISTRY:
     key = f"/{_cmd.name}"
-    if key in SUBCOMMANDS or not _cmd.args_hint:
+    if key in SUBCOMMANDS or not _cmd.参数提示:
         continue
-    m = _PIPE_SUBS_RE.search(_cmd.args_hint)
+    m = _PIPE_SUBS_RE.search(_cmd.参数提示)
     if m:
         SUBCOMMANDS[key] = m.group(0).split("|")
 
@@ -305,7 +303,7 @@ def gateway_help_lines() -> list[str]:
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
-        args = f" {cmd.args_hint}" if cmd.args_hint else ""
+        args = f" {cmd.参数提示}" if cmd.参数提示 else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
             # Skip internal aliases like reload_mcp (underscore variant)

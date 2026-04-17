@@ -1477,10 +1477,10 @@ class FeishuAdapter(BasePlatformAdapter):
                     {
                         "tag": "action",
                         "actions": [
-                            _btn("✅ Allow Once", "approve_once", "primary"),
-                            _btn("✅ Session", "approve_session"),
-                            _btn("✅ Always", "approve_always"),
-                            _btn("❌ Deny", "deny", "danger"),
+                            _btn("✅ 允许一次", "approve_once", "primary"),
+                            _btn("✅ 本次会话", "approve_session"),
+                            _btn("✅ 总是允许", "approve_always"),
+                            _btn("❌ 拒绝", "deny", "danger"),
                         ],
                     },
                 ],

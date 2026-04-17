@@ -203,6 +203,14 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
         pct = round((speed - 1.0) * 100)
         kwargs["rate"] = f"{pct:+d}%"
 
+    # Pass proxy to edge_tts for environments behind a firewall
+    _proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
+    if _proxy and _proxy.startswith("socks"):
+        # edge_tts doesn't support socks proxy, skip
+        _proxy = None
+    if _proxy:
+        kwargs["proxy"] = _proxy
+
     communicate = _edge_tts.Communicate(text, **kwargs)
     await communicate.save(output_path)
     return output_path

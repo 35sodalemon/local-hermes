@@ -633,8 +633,8 @@ def check_dangerous_command(command: str, env_type: str,
             "command": command,
             "description": description,
             "message": (
-                f"⚠️ This command is potentially dangerous ({description}). "
-                f"Asking the user for approval.\n\n**Command:**\n```\n{command}\n```"
+                f"⚠️ 此命令可能存在危险（{description}）。"
+                f"正在请求用户批准。\n\n**命令：**\n```\n{command}\n```"
             ),
         }
 
@@ -644,7 +644,7 @@ def check_dangerous_command(command: str, env_type: str,
     if choice == "deny":
         return {
             "approved": False,
-            "message": f"BLOCKED: User denied this potentially dangerous command (matched '{description}' pattern). Do NOT retry this command - the user has explicitly rejected it.",
+            "message": f"已阻止：用户拒绝了此可能存在危险的命令（匹配'{description}'模式）。请勿重试此命令 - 用户已明确拒绝。",
             "pattern_key": pattern_key,
             "description": description,
         }
@@ -779,8 +779,8 @@ def check_all_command_guards(command: str, env_type: str,
             combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
             return {
                 "approved": False,
-                "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
-                           "The command was assessed as genuinely dangerous. Do NOT retry.",
+                "message": f"被智能审批阻止：{combined_desc_for_llm}。"
+                           "该命令被评估为确实危险。请勿重试。",
                 "smart_denied": True,
             }
         # verdict == "escalate" → fall through to manual prompt
@@ -829,7 +829,7 @@ def check_all_command_guards(command: str, env_type: str,
                         _gateway_queues.pop(session_key, None)
                 return {
                     "approved": False,
-                    "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
+                    "message": "已阻止：无法向用户发送审批请求。请勿重试。",
                     "pattern_key": primary_key,
                     "description": combined_desc,
                 }
@@ -852,10 +852,10 @@ def check_all_command_guards(command: str, env_type: str,
 
             choice = entry.result
             if not resolved or choice is None or choice == "deny":
-                reason = "timed out" if not resolved else "denied by user"
+                reason = "超时" if not resolved else "被用户拒绝"
                 return {
                     "approved": False,
-                    "message": f"BLOCKED: Command {reason}. Do NOT retry this command.",
+                    "message": f"已阻止：命令{reason}。请勿重试此命令。",
                     "pattern_key": primary_key,
                     "description": combined_desc,
                 }
@@ -902,7 +902,7 @@ def check_all_command_guards(command: str, env_type: str,
     if choice == "deny":
         return {
             "approved": False,
-            "message": "BLOCKED: User denied. Do NOT retry.",
+            "message": "已阻止：用户拒绝。请勿重试。",
             "pattern_key": primary_key,
             "description": combined_desc,
         }

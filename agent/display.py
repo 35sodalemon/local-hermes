@@ -208,11 +208,11 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         todos_arg = args.get("todos")
         merge = args.get("merge", False)
         if todos_arg is None:
-            return "reading task list"
+            return "读取任务列表"
         elif merge:
-            return f"updating {len(todos_arg)} task(s)"
+            return f"更新 {len(todos_arg)} 个任务"
         else:
-            return f"planning {len(todos_arg)} task(s)"
+            return f"规划 {len(todos_arg)} 个任务"
 
     if tool_name == "session_search":
         query = _oneline(args.get("query", ""))
@@ -239,16 +239,16 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
 
     if tool_name.startswith("rl_"):
         rl_previews = {
-            "rl_list_environments": "listing envs",
+            "rl_list_environments": "列出环境",
             "rl_select_environment": args.get("name", ""),
-            "rl_get_current_config": "reading config",
+            "rl_get_current_config": "读取配置",
             "rl_edit_config": f"{args.get('field', '')}={args.get('value', '')}",
-            "rl_start_training": "starting",
+            "rl_start_training": "启动训练",
             "rl_check_status": args.get("run_id", "")[:16],
-            "rl_stop_training": f"stopping {args.get('run_id', '')[:16]}",
+            "rl_stop_training": f"停止 {args.get('run_id', '')[:16]}",
             "rl_get_results": args.get("run_id", "")[:16],
-            "rl_list_runs": "listing runs",
-            "rl_test_inference": f"{args.get('num_steps', 3)} steps",
+            "rl_list_runs": "列出运行",
+            "rl_test_inference": f"{args.get('num_steps', 3)} 步",
         }
         return rl_previews.get(tool_name)
 
@@ -595,9 +595,9 @@ class KawaiiSpinner:
     ]
 
     THINKING_VERBS = [
-        "pondering", "contemplating", "musing", "cogitating", "ruminating",
-        "deliberating", "mulling", "reflecting", "processing", "reasoning",
-        "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
+        "思考中", "琢磨中", "沉思中", "推演中", "分析中",
+        "计算中", "整理中", "推敲中", "斟酌中", "检索中",
+        "联想中", "归纳中", "推论中", "酝酿中", "构思中",
     ]
 
     @classmethod
@@ -867,123 +867,124 @@ def get_cute_tool_message(
         return f"{line}{failure_suffix}"
 
     if tool_name == "web_search":
-        return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 42)}  {dur}")
+        return _wrap(f"┊ 🔍 搜索      {_trunc(args.get('query', ''), 42)}  {dur}")
     if tool_name == "web_extract":
         urls = args.get("urls", [])
         if urls:
             url = urls[0] if isinstance(urls, list) else str(urls)
             domain = url.replace("https://", "").replace("http://", "").split("/")[0]
             extra = f" +{len(urls)-1}" if len(urls) > 1 else ""
-            return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
-        return _wrap(f"┊ 📄 fetch     pages  {dur}")
+            return _wrap(f"┊ 📄 抓取      {_trunc(domain, 35)}{extra}  {dur}")
+        return _wrap(f"┊ 📄 抓取      页面  {dur}")
     if tool_name == "web_crawl":
         url = args.get("url", "")
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🕸️  crawl     {_trunc(domain, 35)}  {dur}")
+        return _wrap(f"┊ 🕸️  爬取      {_trunc(domain, 35)}  {dur}")
     if tool_name == "terminal":
         return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]
-        labels = {"list": "ls processes", "poll": f"poll {sid}", "log": f"log {sid}",
-                  "wait": f"wait {sid}", "kill": f"kill {sid}", "write": f"write {sid}", "submit": f"submit {sid}"}
-        return _wrap(f"┊ ⚙️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
+        labels = {"list": "进程列表", "poll": f"轮询 {sid}", "log": f"日志 {sid}",
+                  "wait": f"等待 {sid}", "kill": f"终止 {sid}", "write": f"写入 {sid}", "submit": f"提交 {sid}"}
+        return _wrap(f"┊ ⚙️  进程      {labels.get(action, f'{action} {sid}')}  {dur}")
     if tool_name == "read_file":
-        return _wrap(f"┊ 📖 read      {_path(args.get('path', ''))}  {dur}")
+        return _wrap(f"┊ 📖 读取      {_path(args.get('path', ''))}  {dur}")
     if tool_name == "write_file":
-        return _wrap(f"┊ ✍️  write     {_path(args.get('path', ''))}  {dur}")
+        return _wrap(f"┊ ✍️  写入      {_path(args.get('path', ''))}  {dur}")
     if tool_name == "patch":
-        return _wrap(f"┊ 🔧 patch     {_path(args.get('path', ''))}  {dur}")
+        return _wrap(f"┊ 🔧 补丁      {_path(args.get('path', ''))}  {dur}")
     if tool_name == "search_files":
         pattern = _trunc(args.get("pattern", ""), 35)
         target = args.get("target", "content")
-        verb = "find" if target == "files" else "grep"
-        return _wrap(f"┊ 🔎 {verb:9} {pattern}  {dur}")
+        verb = "查找" if target == "files" else "搜索"
+        return _wrap(f"┊ 🔎 {verb}      {pattern}  {dur}")
     if tool_name == "browser_navigate":
         url = args.get("url", "")
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🌐 navigate  {_trunc(domain, 35)}  {dur}")
+        return _wrap(f"┊ 🌐 导航      {_trunc(domain, 35)}  {dur}")
     if tool_name == "browser_snapshot":
-        mode = "full" if args.get("full") else "compact"
-        return _wrap(f"┊ 📸 snapshot  {mode}  {dur}")
+        mode = "完整" if args.get("full") else "精简"
+        return _wrap(f"┊ 📸 快照      {mode}  {dur}")
     if tool_name == "browser_click":
-        return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
+        return _wrap(f"┊ 👆 点击      {args.get('ref', '?')}  {dur}")
     if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
+        return _wrap(f"┊ ⌨️  输入      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
         arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
-        return _wrap(f"┊ {arrow}  scroll    {d}  {dur}")
+        d_zh = {"down": "下", "up": "上", "right": "右", "left": "左"}.get(d, "下")
+        return _wrap(f"┊ {arrow}  滚动      {d_zh}  {dur}")
     if tool_name == "browser_back":
-        return _wrap(f"┊ ◀️  back      {dur}")
+        return _wrap(f"┊ ◀️  返回      {dur}")
     if tool_name == "browser_press":
-        return _wrap(f"┊ ⌨️  press     {args.get('key', '?')}  {dur}")
+        return _wrap(f"┊ ⌨️  按键      {args.get('key', '?')}  {dur}")
     if tool_name == "browser_get_images":
-        return _wrap(f"┊ 🖼️  images    extracting  {dur}")
+        return _wrap(f"┊ 🖼️  图片      提取中  {dur}")
     if tool_name == "browser_vision":
-        return _wrap(f"┊ 👁️  vision    analyzing page  {dur}")
+        return _wrap(f"┊ 👁️  视觉      分析页面  {dur}")
     if tool_name == "todo":
         todos_arg = args.get("todos")
         merge = args.get("merge", False)
         if todos_arg is None:
-            return _wrap(f"┊ 📋 plan      reading tasks  {dur}")
+            return _wrap(f"┊ 📋 计划      读取任务  {dur}")
         elif merge:
-            return _wrap(f"┊ 📋 plan      update {len(todos_arg)} task(s)  {dur}")
+            return _wrap(f"┊ 📋 计划      更新 {len(todos_arg)} 个任务  {dur}")
         else:
-            return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+            return _wrap(f"┊ 📋 计划      {len(todos_arg)} 个任务  {dur}")
     if tool_name == "session_search":
-        return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
+        return _wrap(f"┊ 🔍 回忆      \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
     if tool_name == "memory":
         action = args.get("action", "?")
         target = args.get("target", "")
         if action == "add":
-            return _wrap(f"┊ 🧠 memory    +{target}: \"{_trunc(args.get('content', ''), 30)}\"  {dur}")
+            return _wrap(f"┊ 🧠 记忆      +{target}: \"{_trunc(args.get('content', ''), 30)}\"  {dur}")
         elif action == "replace":
-            return _wrap(f"┊ 🧠 memory    ~{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
+            return _wrap(f"┊ 🧠 记忆      ~{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
         elif action == "remove":
-            return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
-        return _wrap(f"┊ 🧠 memory    {action}  {dur}")
+            return _wrap(f"┊ 🧠 记忆      -{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
+        return _wrap(f"┊ 🧠 记忆      {action}  {dur}")
     if tool_name == "skills_list":
-        return _wrap(f"┊ 📚 skills    list {args.get('category', 'all')}  {dur}")
+        return _wrap(f"┊ 📚 技能      列表 {args.get('category', '全部')}  {dur}")
     if tool_name == "skill_view":
-        return _wrap(f"┊ 📚 skill     {_trunc(args.get('name', ''), 30)}  {dur}")
+        return _wrap(f"┊ 📚 技能      {_trunc(args.get('name', ''), 30)}  {dur}")
     if tool_name == "image_generate":
-        return _wrap(f"┊ 🎨 create    {_trunc(args.get('prompt', ''), 35)}  {dur}")
+        return _wrap(f"┊ 🎨 生成      {_trunc(args.get('prompt', ''), 35)}  {dur}")
     if tool_name == "text_to_speech":
-        return _wrap(f"┊ 🔊 speak     {_trunc(args.get('text', ''), 30)}  {dur}")
+        return _wrap(f"┊ 🔊 语音      {_trunc(args.get('text', ''), 30)}  {dur}")
     if tool_name == "vision_analyze":
-        return _wrap(f"┊ 👁️  vision    {_trunc(args.get('question', ''), 30)}  {dur}")
+        return _wrap(f"┊ 👁️  视觉      {_trunc(args.get('question', ''), 30)}  {dur}")
     if tool_name == "mixture_of_agents":
-        return _wrap(f"┊ 🧠 reason    {_trunc(args.get('user_prompt', ''), 30)}  {dur}")
+        return _wrap(f"┊ 🧠 推理      {_trunc(args.get('user_prompt', ''), 30)}  {dur}")
     if tool_name == "send_message":
-        return _wrap(f"┊ 📨 send      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 25)}\"  {dur}")
+        return _wrap(f"┊ 📨 发送      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 25)}\"  {dur}")
     if tool_name == "cronjob":
         action = args.get("action", "?")
         if action == "create":
             skills = args.get("skills") or ([] if not args.get("skill") else [args.get("skill")])
             label = args.get("name") or (skills[0] if skills else None) or args.get("prompt", "task")
-            return _wrap(f"┊ ⏰ cron      create {_trunc(label, 24)}  {dur}")
+            return _wrap(f"┊ ⏰ 定时      创建 {_trunc(label, 24)}  {dur}")
         if action == "list":
-            return _wrap(f"┊ ⏰ cron      listing  {dur}")
-        return _wrap(f"┊ ⏰ cron      {action} {args.get('job_id', '')}  {dur}")
+            return _wrap(f"┊ ⏰ 定时      列表  {dur}")
+        return _wrap(f"┊ ⏰ 定时      {action} {args.get('job_id', '')}  {dur}")
     if tool_name.startswith("rl_"):
         rl = {
-            "rl_list_environments": "list envs", "rl_select_environment": f"select {args.get('name', '')}",
-            "rl_get_current_config": "get config", "rl_edit_config": f"set {args.get('field', '?')}",
-            "rl_start_training": "start training", "rl_check_status": f"status {args.get('run_id', '?')[:12]}",
-            "rl_stop_training": f"stop {args.get('run_id', '?')[:12]}", "rl_get_results": f"results {args.get('run_id', '?')[:12]}",
-            "rl_list_runs": "list runs", "rl_test_inference": "test inference",
+            "rl_list_environments": "环境列表", "rl_select_environment": f"选择 {args.get('name', '')}",
+            "rl_get_current_config": "读取配置", "rl_edit_config": f"设置 {args.get('field', '?')}",
+            "rl_start_training": "启动训练", "rl_check_status": f"状态 {args.get('run_id', '?')[:12]}",
+            "rl_stop_training": f"停止 {args.get('run_id', '?')[:12]}", "rl_get_results": f"结果 {args.get('run_id', '?')[:12]}",
+            "rl_list_runs": "运行列表", "rl_test_inference": "测试推理",
         }
-        return _wrap(f"┊ 🧪 rl        {rl.get(tool_name, tool_name.replace('rl_', ''))}  {dur}")
+        return _wrap(f"┊ 🧪 RL        {rl.get(tool_name, tool_name.replace('rl_', ''))}  {dur}")
     if tool_name == "execute_code":
         code = args.get("code", "")
         first_line = code.strip().split("\n")[0] if code.strip() else ""
-        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
+        return _wrap(f"┊ 🐍 执行      {_trunc(first_line, 35)}  {dur}")
     if tool_name == "delegate_task":
         tasks = args.get("tasks")
         if tasks and isinstance(tasks, list):
-            return _wrap(f"┊ 🔀 delegate  {len(tasks)} parallel tasks  {dur}")
-        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
+            return _wrap(f"┊ 🔀 委托      {len(tasks)} 个并行任务  {dur}")
+        return _wrap(f"┊ 🔀 委托      {_trunc(args.get('goal', ''), 35)}  {dur}")
 
     preview = build_tool_preview(tool_name, args) or ""
     return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")

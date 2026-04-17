@@ -29,6 +29,34 @@ _BLOCKED_HOSTNAMES = frozenset({
     "metadata.goog",
 })
 
+# Trusted platform CDN domains — skip SSRF DNS check because they are known
+# public services.  In proxy environments (e.g. Clash on localhost), DNS
+# resolution may return the proxy's internal address, causing false positives.
+_TRUSTED_DOMAINS = frozenset({
+    "cdn.discordapp.com",
+    "discord.com",
+    "gateway.discord.gg",
+    "api.telegram.org",
+    "api.slack.com",
+    "slack.com",
+    "files.slack.com",
+    "upload.wikimedia.org",
+    "avatars.githubusercontent.com",
+})
+
+
+def _is_trusted_domain(hostname: str) -> bool:
+    """Return True if the hostname (or its parent) is in the trusted set."""
+    if hostname in _TRUSTED_DOMAINS:
+        return True
+    # Check parent domains, e.g. cdn-raw.discordapp.com
+    parts = hostname.split(".")
+    for i in range(1, len(parts)):
+        parent = ".".join(parts[i:])
+        if parent in _TRUSTED_DOMAINS:
+            return True
+    return False
+
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
 # ipaddress.is_private — it returns False for both is_private and is_global.
 # Must be blocked explicitly. Used by carrier-grade NAT, Tailscale/WireGuard
@@ -64,6 +92,10 @@ def is_safe_url(url: str) -> bool:
         if hostname in _BLOCKED_HOSTNAMES:
             logger.warning("Blocked request to internal hostname: %s", hostname)
             return False
+
+        # Skip DNS check for trusted platform domains (CDN, API hosts)
+        if _is_trusted_domain(hostname):
+            return True
 
         # Try to resolve and check IP
         try:

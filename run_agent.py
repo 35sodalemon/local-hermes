@@ -8776,8 +8776,8 @@ class AIAgent:
                         _nous_remaining = nous_rate_limit_remaining()
                         if _nous_remaining is not None and _nous_remaining > 0:
                             _nous_msg = (
-                                f"Nous Portal rate limit active — "
-                                f"resets in {_fmt_nous_remaining(_nous_remaining)}."
+                                f"Nous Portal 限速中 — "
+                                f"{_fmt_nous_remaining(_nous_remaining)}后重置."
                             )
                             self._vprint(
                                 f"{self.log_prefix}⏳ {_nous_msg} Trying fallback...",
@@ -8794,9 +8794,8 @@ class AIAgent:
                             return {
                                 "final_response": (
                                     f"⏳ {_nous_msg}\n\n"
-                                    "No fallback provider available. "
-                                    "Try again after the reset, or add a "
-                                    "fallback provider in config.yaml."
+                                    "无备用供应商可用。"
+                                    "等待重置后重试，或在 config.yaml 添加备用供应商。"
                                 ),
                                 "messages": messages,
                                 "api_calls": api_call_count,
@@ -10989,9 +10988,9 @@ class AIAgent:
                                 self.provider,
                             )
                             self._emit_status(
-                                "❌ Model returned no content after all retries"
-                                + (" and fallback attempts." if self._fallback_chain else
-                                   ". No fallback providers configured.")
+                                "❌ 所有重试后模型无返回内容"
+                                + ("，含备用供应商尝试。" if self._fallback_chain else
+                                   "，未配置备用供应商。")
                             )
 
                         final_response = "(empty)"

@@ -728,7 +728,7 @@ DEFAULT_CONFIG = {
     #   smart  — use auxiliary LLM to auto-approve low-risk commands, prompt for high-risk
     #   off    — skip all approval prompts (equivalent to --yolo)
     "approvals": {
-        "mode": "manual",
+        "mode": "smart",
         "timeout": 60,
     },
 

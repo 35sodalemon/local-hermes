@@ -329,6 +329,18 @@ def _guess_chat_type(message: Dict[str, Any], account_id: str) -> Tuple[str, str
     return "dm", str(message.get("from_user_id") or "")
 
 
+def _explicit_proxy() -> Optional[str]:
+    """Return explicit proxy URL for iLink API calls.
+
+    When Clash TUN is active, DNS resolves to virtual IPs (198.18.x.x) and
+    aiohttp's trust_env proxy handling may not engage correctly, causing
+    connections to time out.  Passing the proxy explicitly to each request
+    ensures it always goes through the HTTP proxy tunnel.
+    """
+    import os as _os
+    return _os.environ.get("HTTPS_PROXY") or _os.environ.get("HTTP_PROXY") or None
+
+
 async def _api_post(
     session: "aiohttp.ClientSession",
     *,
@@ -341,7 +353,7 @@ async def _api_post(
     body = _json_dumps({**payload, "base_info": _base_info()})
     url = f"{base_url.rstrip('/')}/{endpoint}"
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-    async with session.post(url, data=body, headers=_headers(token, body), timeout=timeout) as response:
+    async with session.post(url, data=body, headers=_headers(token, body), timeout=timeout, proxy=_explicit_proxy()) as response:
         raw = await response.text()
         if not response.ok:
             raise RuntimeError(f"iLink POST {endpoint} HTTP {response.status}: {raw[:200]}")
@@ -361,7 +373,7 @@ async def _api_get(
         "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
     }
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
-    async with session.get(url, headers=headers, timeout=timeout) as response:
+    async with session.get(url, headers=headers, timeout=timeout, proxy=_explicit_proxy()) as response:
         raw = await response.text()
         if not response.ok:
             raise RuntimeError(f"iLink GET {endpoint} HTTP {response.status}: {raw[:200]}")
@@ -509,7 +521,7 @@ async def _upload_ciphertext(
     upload_full_url — both use POST with the raw ciphertext as the body.
     """
     timeout = aiohttp.ClientTimeout(total=120)
-    async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}, timeout=timeout) as response:
+    async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}, timeout=timeout, proxy=_explicit_proxy()) as response:
         if response.status == 200:
             encrypted_param = response.headers.get("x-encrypted-param")
             if encrypted_param:
@@ -528,7 +540,7 @@ async def _download_bytes(
     timeout_seconds: float = 60.0,
 ) -> bytes:
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    async with session.get(url, timeout=timeout) as response:
+    async with session.get(url, timeout=timeout, proxy=_explicit_proxy()) as response:
         response.raise_for_status()
         return await response.read()
 
@@ -1134,6 +1146,11 @@ class WeixinAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[%s] Token lock unavailable (non-fatal): %s", self.name, exc)
 
+        # NOTE: iLink (ilinkai.weixin.qq.com) is a domestic Chinese service.
+        # When running behind a proxy (e.g. Clash TUN), requests may be routed
+        # through foreign proxies and timeout.  The fix is to add a DIRECT rule
+        # for *.weixin.qq.com in the proxy configuration, or disable TUN for
+        # this domain.  trust_env=True is kept so aiohttp reads NO_PROXY if set.
         self._session = aiohttp.ClientSession(trust_env=True)
         self._token_store.restore(self._account_id)
         self._poll_task = asyncio.create_task(self._poll_loop(), name="weixin-poll")
@@ -1172,6 +1189,10 @@ class WeixinAdapter(BasePlatformAdapter):
                     sync_buf=sync_buf,
                     timeout_ms=timeout_ms,
                 )
+                logger.info("[%s] _get_updates response: ret=%s errcode=%s msgs=%d buf_changed=%s",
+                            self.name, response.get("ret"), response.get("errcode"),
+                            len(response.get("msgs") or []),
+                            response.get("get_updates_buf","") != sync_buf)
                 suggested_timeout = response.get("longpolling_timeout_ms")
                 if isinstance(suggested_timeout, int) and suggested_timeout > 0:
                     timeout_ms = suggested_timeout
@@ -1590,7 +1611,153 @@ class WeixinAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        return await self.send_document(chat_id, audio_path, caption=caption or "", metadata=metadata)
+        if not self._session or not self._token:
+            logger.warning("[%s] send_voice: not connected", self.name)
+            return SendResult(success=False, error="Not connected")
+        converted_path: str = audio_path
+        try:
+            logger.info("[%s] send_voice: converting %s for chat=%s", self.name, audio_path, _safe_id(chat_id))
+            # Convert audio to SILK/AMR so WeChat renders it as a voice bubble.
+            # WeChat only accepts SILK or AMR for voice messages; raw MP3/OGG
+            # causes a silent failure where nothing appears in the chat.
+            converted_path = await self._convert_audio_for_voice(audio_path)
+            logger.info("[%s] send_voice: converted to %s, sending via _send_file", self.name, converted_path)
+            message_id = await self._send_file(chat_id, converted_path, caption or "")
+            logger.info("[%s] send_voice: sent successfully, msg_id=%s", self.name, message_id)
+            return SendResult(success=True, message_id=message_id)
+        except Exception as exc:
+            logger.error("[%s] send_voice failed to=%s: %s", self.name, _safe_id(chat_id), exc, exc_info=True)
+            # Fallback: try sending as a regular document
+            try:
+                logger.info("[%s] send_voice: falling back to send_document", self.name)
+                return await self.send_document(chat_id, audio_path, caption=caption or "", metadata=metadata)
+            except Exception as fallback_exc:
+                logger.error("[%s] send_voice fallback send_document also failed: %s", self.name, fallback_exc, exc_info=True)
+                return SendResult(success=False, error=str(exc))
+        finally:
+            # Clean up converted temp file if we created one
+            if converted_path != audio_path:
+                try:
+                    os.unlink(converted_path)
+                except OSError:
+                    pass
+
+    async def _convert_audio_for_voice(self, audio_path: str) -> str:
+        """Convert audio to SILK (preferred) or AMR format for WeChat voice messages.
+
+        WeChat requires SILK or AMR format to render voice bubbles.  This
+        method converts any common audio format (OGG, MP3, WAV, etc.) to a
+        WeChat-compatible format using the following strategy:
+
+        1. If the file is already SILK (``#!SILK`` header), return as-is.
+        2. Try *pilk* (if installed) to encode to SILK via PCM intermediate.
+        3. Fall back to *ffmpeg* AMR encoding (widely available).
+
+        Returns the path to a converted temp file, or the original path if
+        no conversion was needed.
+        """
+        data = Path(audio_path).read_bytes()
+
+        # Already SILK – nothing to do
+        if data[:4] == b"#!SILK" or data[:9] == b"#!SILK_V3":
+            return audio_path
+
+        # --- Try pilk (SILK encoder) ---
+        try:
+            import pilk  # type: ignore[import-untyped]
+
+            # pilk needs PCM input – use ffmpeg to produce WAV first
+            wav_path = await self._ffmpeg_to_wav(audio_path)
+            if wav_path:
+                try:
+                    silk_path = wav_path.rsplit(".", 1)[0] + ".silk"
+                    pcm_path = wav_path.rsplit(".", 1)[0] + ".pcm"
+                    # pilk can encode WAV → SILK directly
+                    pilk.encode(wav_path, silk_path, pcm_rate=24000)
+                    # Clean up intermediates
+                    for tmp in (wav_path, pcm_path):
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
+                    if Path(silk_path).exists() and Path(silk_path).stat().st_size > 0:
+                        logger.debug("[%s] Converted %s → SILK via pilk", self.name, Path(audio_path).name)
+                        return silk_path
+                except Exception as exc:
+                    logger.debug("[%s] pilk SILK encode failed: %s", self.name, exc)
+                    for tmp in (wav_path, wav_path.rsplit(".", 1)[0] + ".silk", wav_path.rsplit(".", 1)[0] + ".pcm"):
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
+        except ImportError:
+            pass
+
+        # --- Fall back to ffmpeg AMR encoding ---
+        amr_path = await self._ffmpeg_to_amr(audio_path)
+        if amr_path:
+            logger.debug("[%s] Converted %s → AMR via ffmpeg", self.name, Path(audio_path).name)
+            return amr_path
+
+        # No conversion succeeded – return original and let _send_file try
+        logger.warning("[%s] Could not convert %s for WeChat voice – sending as-is", self.name, Path(audio_path).name)
+        return audio_path
+
+    async def _ffmpeg_to_wav(self, src_path: str) -> Optional[str]:
+        """Convert any audio file to a temporary WAV via ffmpeg."""
+        import shutil
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        wav_path = src_path.rsplit(".", 1)[0] + "_hermes_temp.wav"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffmpeg, "-y", "-i", src_path,
+                "-ar", "24000", "-ac", "1", "-f", "wav", wav_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=30)
+            if proc.returncode == 0 and Path(wav_path).exists() and Path(wav_path).stat().st_size > 0:
+                return wav_path
+        except Exception as exc:
+            logger.debug("[%s] ffmpeg WAV conversion failed: %s", self.name, exc)
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        return None
+
+    async def _ffmpeg_to_amr(self, src_path: str) -> Optional[str]:
+        """Convert any audio file to a temporary AMR via ffmpeg."""
+        import shutil
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        amr_path = src_path.rsplit(".", 1)[0] + "_hermes_temp.amr"
+        # Try AMR-NB first (universally available), then AMR-WB (better quality)
+        codecs = ["libopencore_amrnb", "libopencore_amrwb"]
+        for codec in codecs:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    ffmpeg, "-y", "-i", src_path,
+                    "-ar", "8000", "-ac", "1", "-b:a", "12.2k",
+                    "-acodec", codec, amr_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=30)
+                if proc.returncode == 0 and Path(amr_path).exists() and Path(amr_path).stat().st_size > 0:
+                    return amr_path
+            except Exception as exc:
+                logger.debug("[%s] ffmpeg AMR conversion with %s failed: %s", self.name, codec, exc)
+            try:
+                os.unlink(amr_path)
+            except OSError:
+                pass
+        return None
 
     async def _download_remote_media(self, url: str) -> str:
         from tools.url_safety import is_safe_url
@@ -1723,7 +1890,7 @@ class WeixinAdapter(BasePlatformAdapter):
                     "video_md5": kw.get("rawfilemd5", ""),
                 },
             }
-        if mime.startswith("audio/") or path.endswith(".silk"):
+        if mime.startswith("audio/") or path.endswith((".silk", ".amr")):
             return MEDIA_VOICE, lambda **kw: {
                 "type": ITEM_VOICE,
                 "voice_item": {
@@ -1811,10 +1978,12 @@ async def send_weixin_direct(
             if not last_result.success:
                 return {"error": f"Weixin send failed: {last_result.error}"}
 
-        for media_path, _is_voice in media_files or []:
+        for media_path, is_voice in media_files or []:
             ext = Path(media_path).suffix.lower()
             if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
                 last_result = await adapter.send_image_file(chat_id, media_path)
+            elif is_voice:
+                last_result = await adapter.send_voice(chat_id, media_path)
             else:
                 last_result = await adapter.send_document(chat_id, media_path)
             if not last_result.success:

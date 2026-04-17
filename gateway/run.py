@@ -3525,19 +3525,19 @@ class GatewayRunner:
                     adapter = self.adapters.get(source.platform)
                     if adapter:
                         if reset_reason == "suspended":
-                            reason_text = "previous session was stopped or interrupted"
+                            reason_text = "上一会话已停止或中断"
                         elif reset_reason == "daily":
-                            reason_text = f"daily schedule at {policy.at_hour}:00"
+                            reason_text = f"每日定时重置（{policy.at_hour}:00）"
                         else:
                             hours = policy.idle_minutes // 60
                             mins = policy.idle_minutes % 60
                             duration = f"{hours}h" if not mins else f"{hours}h {mins}m" if hours else f"{mins}m"
-                            reason_text = f"inactive for {duration}"
+                            reason_text = f"闲置 {duration} 未活动"
                         notice = (
-                            f"◐ Session automatically reset ({reason_text}). "
-                            f"Conversation history cleared.\n"
-                            f"Use /resume to browse and restore a previous session.\n"
-                            f"Adjust reset timing in config.yaml under session_reset."
+                            f"◐ 会话已自动重置（{reason_text}）。"
+                            f"对话历史已清空。\n"
+                            f"用 /resume 浏览和恢复之前的会话。\n"
+                            f"在 config.yaml 的 session_reset 调整重置时机。"
                         )
                         try:
                             session_info = self._format_session_info()
@@ -3921,6 +3921,7 @@ class GatewayRunner:
                 session_key=session_key,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                is_new_session=_is_new_session,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -8119,6 +8120,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        is_new_session: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -8508,6 +8510,38 @@ class GatewayRunner:
                     "api_calls": 0,
                     "tools": [],
                 }
+
+            # --- Model identity correction on session reuse ---
+            # When a session is reused after a gateway restart or a global
+            # model switch, the transcript may contain stale model identity
+            # references from previous turns.  Inject a correction note
+            # so the agent reports its actual current model.
+            if history and not is_new_session and model:
+                try:
+                    _sj_path = _hermes_home / "sessions" / f"session_{session_id}.json"
+                    _prev_model = None
+                    if _sj_path.exists():
+                        _head = _sj_path.read_text(encoding="utf-8")[:1024]
+                        _m = re.search(r'"model"\s*:\s*"([^"]+)"', _head)
+                        if _m:
+                            _prev_model = _m.group(1)
+                    if _prev_model and _prev_model != model:
+                        _model_change_note = (
+                            f"[System note: The model for this session has been "
+                            f"updated from {_prev_model} to {model}. Previous "
+                            f"conversation history may reference the old model — "
+                            f"disregard those references and always identify "
+                            f"yourself as running on {model}.]"
+                        )
+                        combined_ephemeral = (
+                            _model_change_note + "\n\n" + combined_ephemeral
+                        ).strip()
+                        logger.info(
+                            "Model identity correction: session=%s old=%s new=%s",
+                            (session_key or "")[:30], _prev_model, model,
+                        )
+                except Exception:
+                    pass
 
             pr = self._provider_routing
             reasoning_config = self._load_reasoning_config()

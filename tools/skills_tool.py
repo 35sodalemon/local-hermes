@@ -569,7 +569,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in disabled:
                     continue
 
-                description = frontmatter.get("description", "")
+                description = frontmatter.get("description_zh", "") or frontmatter.get("description", "")
                 if not description:
                     for line in body.strip().split("\n"):
                         line = line.strip()
