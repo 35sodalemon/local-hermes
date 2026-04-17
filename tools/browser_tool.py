@@ -2315,7 +2315,7 @@ if __name__ == "__main__":
             print(f"     Install: {_browser_install_hint()}")
         if _cp is not None and not _cp.is_configured():
             print(f"   - {_cp.provider_name()} credentials not configured")
-            print("   提示：将 browser.cloud_provider 设置为 'local' 可使用免费的本地模式")
+            print("   Tip: set browser.cloud_provider to 'local' to use free local mode instead")
     
     print("\n📋 Available Browser Tools:")
     for schema in BROWSER_TOOL_SCHEMAS:

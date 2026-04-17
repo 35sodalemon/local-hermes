@@ -3566,7 +3566,7 @@ class HermesCLI:
         if _remainder:
             _cprint(f"  {_DIM}Now type your prompt (or use --image in single-query mode): {_remainder}{_RST}")
         elif _is_termux_environment():
-            _cprint(f"  {_DIM}提示：输入下一条消息，或运行 hermes chat -q --image {_termux_example_image_path(image_path.name)} \"你看到了什么？\"{_RST}")
+            _cprint(f"  {_DIM}Tip: type your next message, or run hermes chat -q --image {_termux_example_image_path(image_path.name)} \"What do you see?\"{_RST}")
 
     def _preprocess_images_with_vision(self, text: str, images: list, *, announce: bool = True) -> str:
         """Analyze attached images via the vision tool and return enriched text.
@@ -4187,7 +4187,7 @@ class HermesCLI:
             _cprint("  用法: /resume <会话ID或标题>")
             if self._show_recent_sessions(reason="resume"):
                 return
-            _cprint("  提示：使用 /history 或 `hermes sessions list` 查找会话。")
+            _cprint("  Tip:   Use /history or `hermes sessions list` to find sessions.")
             return
 
         if not self._session_db:
@@ -5410,7 +5410,7 @@ class HermesCLI:
                         _tip_color = get_active_skin().get_color("banner_dim", "#B8860B")
                     except Exception:
                         _tip_color = "#B8860B"
-                    cc.print(f"[dim {_tip_color}]✦ 提示： {_tip}[/]")
+                    cc.print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
                 except Exception:
                     pass
             else:
@@ -5425,7 +5425,7 @@ class HermesCLI:
                         _tip_color = get_active_skin().get_color("banner_dim", "#B8860B")
                     except Exception:
                         _tip_color = "#B8860B"
-                    self.console.print(f"[dim {_tip_color}]✦ 提示： {_tip}[/]")
+                    self.console.print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
                 except Exception:
                     pass
         elif canonical == "history":
@@ -6749,7 +6749,7 @@ class HermesCLI:
 
         from agent.display import get_tool_emoji
         emoji = get_tool_emoji(tool_name, default="⚡")
-        _cprint(f"  ┊ {emoji} 正在准备 {tool_name}…")
+        _cprint(f"  ┊ {emoji} preparing {tool_name}…")
 
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)
@@ -8400,7 +8400,7 @@ class HermesCLI:
                 _tip_color = _welcome_skin.get_color("banner_dim", "#B8860B")
             except Exception:
                 _tip_color = "#B8860B"
-            self.console.print(f"[dim {_tip_color}]✦ 提示： {_tip}[/]")
+            self.console.print(f"[dim {_tip_color}]✦ Tip: {_tip}[/]")
         except Exception:
             pass  # Tips are non-critical — never break startup
         if self.preloaded_skills and not self._startup_skills_line_shown:

@@ -3962,7 +3962,7 @@ def _qr_register_inner(
         print(f"\n  Scan the QR code above, or open this URL directly:\n  {qr_url}")
     else:
         print(f"  Open this URL in Feishu / Lark on your phone:\n\n  {qr_url}\n")
-        print("  提示：运行 pip install qrcode 以显示可扫描的二维码")
+        print("  Tip: pip install qrcode  to display a scannable QR code here next time")
     print()
 
     result = _poll_registration(

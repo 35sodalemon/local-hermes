@@ -304,7 +304,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
         c.print(f"  [yellow]⚡ Slow sources skipped: {', '.join(timed_out)} "
                 f"— run again for cached results[/]")
 
-    c.print("[dim]提示：'hermes skills search <query>' 可在所有注册表中深度搜索[/]\n")
+    c.print("[dim]Tip: 'hermes skills search <query>' searches deeper across all registries[/]\n")
 
 
 def do_install(identifier: str, category: str = "", force: bool = False,

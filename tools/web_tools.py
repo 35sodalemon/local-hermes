@@ -556,9 +556,9 @@ async def process_content_with_llm(
         
     except Exception as e:
         logger.warning(
-            "web_extract LLM 摘要失败（%s）。"
-            "提示：在 config.yaml 中增加 auxiliary.web_extract.timeout "
-            "或切换到更快的辅助模型。",
+            "web_extract LLM summarization failed (%s). "
+            "Tip: increase auxiliary.web_extract.timeout in config.yaml "
+            "or switch to a faster auxiliary model.",
             str(e)[:120],
         )
         # Fall back to truncated raw content instead of returning a useless
