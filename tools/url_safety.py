@@ -29,33 +29,12 @@ _BLOCKED_HOSTNAMES = frozenset({
     "metadata.goog",
 })
 
-# Trusted platform CDN domains — skip SSRF DNS check because they are known
-# public services.  In proxy environments (e.g. Clash on localhost), DNS
-# resolution may return the proxy's internal address, causing false positives.
-_TRUSTED_DOMAINS = frozenset({
-    "cdn.discordapp.com",
-    "discord.com",
-    "gateway.discord.gg",
-    "api.telegram.org",
-    "api.slack.com",
-    "slack.com",
-    "files.slack.com",
-    "upload.wikimedia.org",
-    "avatars.githubusercontent.com",
+# Exact HTTPS hostnames allowed to resolve to private/benchmark-space IPs.
+# This is intentionally narrow: QQ media downloads can legitimately resolve
+# to 198.18.0.0/15 behind local proxy/benchmark infrastructure.
+_TRUSTED_PRIVATE_IP_HOSTS = frozenset({
+    "multimedia.nt.qq.com.cn",
 })
-
-
-def _is_trusted_domain(hostname: str) -> bool:
-    """Return True if the hostname (or its parent) is in the trusted set."""
-    if hostname in _TRUSTED_DOMAINS:
-        return True
-    # Check parent domains, e.g. cdn-raw.discordapp.com
-    parts = hostname.split(".")
-    for i in range(1, len(parts)):
-        parent = ".".join(parts[i:])
-        if parent in _TRUSTED_DOMAINS:
-            return True
-    return False
 
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
 # ipaddress.is_private — it returns False for both is_private and is_global.
@@ -76,6 +55,11 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+def _allows_private_ip_resolution(hostname: str, scheme: str) -> bool:
+    """Return True when a trusted HTTPS hostname may bypass IP-class blocking."""
+    return scheme == "https" and hostname in _TRUSTED_PRIVATE_IP_HOSTS
+
+
 def is_safe_url(url: str) -> bool:
     """Return True if the URL target is not a private/internal address.
 
@@ -84,7 +68,8 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        hostname = (parsed.hostname or "").strip().lower()
+        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+        scheme = (parsed.scheme or "").strip().lower()
         if not hostname:
             return False
 
@@ -93,9 +78,7 @@ def is_safe_url(url: str) -> bool:
             logger.warning("Blocked request to internal hostname: %s", hostname)
             return False
 
-        # Skip DNS check for trusted platform domains (CDN, API hosts)
-        if _is_trusted_domain(hostname):
-            return True
+        allow_private_ip = _allows_private_ip_resolution(hostname, scheme)
 
         # Try to resolve and check IP
         try:
@@ -113,12 +96,18 @@ def is_safe_url(url: str) -> bool:
             except ValueError:
                 continue
 
-            if _is_blocked_ip(ip):
+            if not allow_private_ip and _is_blocked_ip(ip):
                 logger.warning(
                     "Blocked request to private/internal address: %s -> %s",
                     hostname, ip_str,
                 )
                 return False
+
+        if allow_private_ip:
+            logger.debug(
+                "Allowing trusted hostname despite private/internal resolution: %s",
+                hostname,
+            )
 
         return True
 

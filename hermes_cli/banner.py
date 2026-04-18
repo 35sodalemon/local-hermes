@@ -124,11 +124,13 @@ _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
 
 def check_for_updates() -> Optional[int]:
-    """Check how many commits behind origin/main the local repo is.
+    """Check how many commits behind upstream/main (or origin/main) the local repo is.
 
     Does a ``git fetch`` at most once every 6 hours (cached to
     ``~/.hermes/.update_check``).  Returns the number of commits behind,
     or ``None`` if the check fails or isn't applicable.
+
+    Priority: checks upstream/main first (official repo), falls back to origin/main (fork).
     """
     hermes_home = get_hermes_home()
     repo_dir = hermes_home / "hermes-agent"
@@ -150,29 +152,35 @@ def check_for_updates() -> Optional[int]:
     except Exception:
         pass
 
-    # Fetch latest refs (fast — only downloads ref metadata, no files)
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
-            capture_output=True, timeout=10,
-            cwd=str(repo_dir),
-        )
-    except Exception:
-        pass  # Offline or timeout — use stale refs, that's fine
+    # Fetch latest refs from both origin and upstream (fast — only ref metadata)
+    for remote in ("origin", "upstream"):
+        try:
+            subprocess.run(
+                ["git", "fetch", remote, "--quiet"],
+                capture_output=True, timeout=10,
+                cwd=str(repo_dir),
+            )
+        except Exception:
+            pass  # Offline or timeout — use stale refs
 
-    # Count commits behind
-    try:
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(repo_dir),
-        )
-        if result.returncode == 0:
-            behind = int(result.stdout.strip())
-        else:
-            behind = None
-    except Exception:
-        behind = None
+    # Count commits behind — prefer upstream/main, fall back to origin/main
+    behind = None
+    for ref in ("upstream/main", "origin/main"):
+        try:
+            result = subprocess.run(
+                ["git", "rev-list", "--count", f"HEAD..{ref}"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(repo_dir),
+            )
+            if result.returncode == 0:
+                count = int(result.stdout.strip())
+                if count > 0:
+                    behind = count
+                    break  # upstream has updates, use it
+                elif behind is None:
+                    behind = 0  # this ref is up to date, keep checking upstream
+        except Exception:
+            continue
 
     # Write cache
     try:
