@@ -87,8 +87,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("bg",), 参数提示="<提示>"),
     CommandDef("btw", "临时旁问（无工具，不存历史）", "会话",
                参数提示="<问题>"),
+    CommandDef("agents", "显示活跃代理和运行中的任务", "会话",
+               aliases=("tasks",)),
     CommandDef("queue", "排队提示，不打断当前对话", "会话",
                aliases=("q",), 参数提示="<提示>"),
+    CommandDef("steer", "在下次工具调用后注入消息（不中断）", "会话",
+               参数提示="<提示>"),
     CommandDef("status", "显示会话信息", "会话"),
     CommandDef("profile", "显示当前配置和主目录", "信息"),
     CommandDef("sethome", "设为家频道", "会话",
@@ -252,10 +256,10 @@ GATEWAY_KNOWN_COMMANDS: frozenset[str] = frozenset(
 )
 
 
-# Commands that must never be queued behind an active gateway session.
-# These are explicit control/info commands handled by the gateway itself;
-# if they get queued as pending text, the safety net in gateway.run will
-# discard them before they ever reach the user.
+# Commands with explicit Level-2 running-agent handlers in gateway/run.py.
+# Listed here for introspection / tests; semantically a subset of
+# "all resolvable commands" — which is the real bypass set (see
+# should_bypass_active_session below).
 ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
     {
         "agents",
@@ -277,9 +281,26 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
 
 
 def should_bypass_active_session(command_name: str | None) -> bool:
-    """Return True when a slash command must bypass active-session queuing."""
-    cmd = resolve_command(command_name) if command_name else None
-    return bool(cmd and cmd.name in ACTIVE_SESSION_BYPASS_COMMANDS)
+    """Return True for any resolvable slash command.
+
+    Rationale: every gateway-registered slash command either has a
+    specific Level-2 handler in gateway/run.py (/stop, /new, /model,
+    /approve, etc.) or reaches the running-agent catch-all that returns
+    a "busy — wait or /stop first" response. In both paths the command
+    is dispatched, not queued.
+
+    Queueing is always wrong for a recognized slash command because the
+    safety net in gateway.run discards any command text that reaches
+    the pending queue — which meant a mid-run /model (or /reasoning,
+    /voice, /insights, /title, /resume, /retry, /undo, /compress,
+    /usage, /provider, /reload-mcp, /sethome, /reset) would silently
+    interrupt the agent AND get discarded, producing a zero-char
+    response. See issue #5057 / PRs #6252, #10370, #4665.
+
+    ACTIVE_SESSION_BYPASS_COMMANDS remains the subset of commands with
+    explicit Level-2 handlers; the rest fall through to the catch-all.
+    """
+    return resolve_command(command_name) is not None if command_name else False
 
 
 def _resolve_config_gates() -> set[str]:
