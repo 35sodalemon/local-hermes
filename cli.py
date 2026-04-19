@@ -4505,7 +4505,7 @@ class HermesCLI:
 
     def _open_model_picker(self, providers: list, current_model: str, current_provider: str, user_provs=None, custom_provs=None) -> None:
         """Open prompt_toolkit-native /model picker modal."""
-        self._capture_modal_input_snapshot()
+        self._capture_modal_input_snapshot(skip_if_slash_command=True)
         default_idx = next((i for i, p in enumerate(providers) if p.get("is_current")), 0)
         self._model_picker_state = {
             "stage": "provider",
@@ -7618,14 +7618,24 @@ class HermesCLI:
     def _secret_capture_callback(self, var_name: str, prompt: str, metadata=None) -> dict:
         return prompt_for_secret(self, var_name, prompt, metadata)
 
-    def _capture_modal_input_snapshot(self) -> None:
-        """Temporarily clear the input buffer and save the user's in-progress draft."""
+    def _capture_modal_input_snapshot(self, skip_if_slash_command: bool = False) -> None:
+        """Temporarily clear the input buffer and save the user's in-progress draft.
+        
+        Args:
+            skip_if_slash_command: 若为 True，当输入框内容是斜杠命令（以 / 开头）时
+                                  不保存快照，避免关闭模态框后残留命令文本。
+        """
         if self._modal_input_snapshot is not None or not getattr(self, "_app", None):
             return
         try:
             buf = self._app.current_buffer
+            text = buf.text
+            # 斜杠命令是正在执行的指令，不是用户草稿，不应恢复
+            if skip_if_slash_command and text.lstrip().startswith("/"):
+                buf.reset()
+                return
             self._modal_input_snapshot = {
-                "text": buf.text,
+                "text": text,
                 "cursor_position": buf.cursor_position,
             }
             buf.reset()
@@ -7878,7 +7888,7 @@ class HermesCLI:
                             # But if it does (race condition), don't interrupt.
                             if self._clarify_state or self._clarify_freetext:
                                 continue
-                            print("\n⚡ New message detected, interrupting...")
+                            print("\n⚡ 检测到新消息，正在中断当前操作...")
                             # Signal TTS to stop on interrupt
                             if stop_event is not None:
                                 stop_event.set()
@@ -8000,7 +8010,7 @@ class HermesCLI:
                 pending_message = result.get("interrupt_message") or interrupt_msg
                 # Add indicator that we were interrupted
                 if response and pending_message:
-                    response = response + "\n\n---\n_[Interrupted - processing new message]_"
+                    response = response + "\n\n---\n_[已中断 - 正在处理新消息]_"
 
             response_previewed = result.get("response_previewed", False) if result else False
 
