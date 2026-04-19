@@ -1604,6 +1604,55 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
+def _ensure_server_connected(server_name: str) -> bool:
+    """确保MCP服务器已连接，如果未连接则尝试连接。
+    
+    这是懒加载的核心函数，在第一次使用MCP工具时调用。
+    
+    Args:
+        server_name: 服务器名称
+        
+    Returns:
+        bool: 连接成功返回True，失败返回False
+    """
+    # 首先检查是否已连接
+    with _lock:
+        server = _servers.get(server_name)
+    if server and server.session:
+        return True
+    
+    # 确保事件循环已启动
+    _ensure_mcp_loop()
+    
+    # 加载服务器配置
+    servers_config = _load_mcp_config()
+    if server_name not in servers_config:
+        logger.error(f"MCP server '{server_name}' not found in config")
+        return False
+    
+    server_config = servers_config[server_name]
+    
+    # 检查是否启用
+    if not _parse_boolish(server_config.get("enabled", True), default=True):
+        logger.debug(f"MCP server '{server_name}' is disabled")
+        return False
+    
+    # 尝试连接
+    try:
+        connect_timeout = server_config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+        
+        async def _connect():
+            return await _discover_and_register_server(server_name, server_config)
+        
+        # 在MCP事件循环上运行连接
+        result = _run_on_mcp_loop(_connect(), timeout=connect_timeout)
+        logger.info(f"懒加载连接MCP服务器 '{server_name}' 成功")
+        return True
+    except Exception as e:
+        logger.warning(f"懒加载连接MCP服务器 '{server_name}' 失败: {e}")
+        return False
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -1628,10 +1677,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         with _lock:
             server = _servers.get(server_name)
         if not server or not server.session:
-            _server_error_counts[server_name] = _server_error_counts.get(server_name, 0) + 1
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            }, ensure_ascii=False)
+            # 尝试懒加载连接
+            if not _ensure_server_connected(server_name):
+                _server_error_counts[server_name] = _server_error_counts.get(server_name, 0) + 1
+                return json.dumps({
+                    "error": f"MCP server '{server_name}' is not connected and failed to connect"
+                }, ensure_ascii=False)
+            # 重新获取服务器连接
+            with _lock:
+                server = _servers.get(server_name)
+            if not server or not server.session:
+                _server_error_counts[server_name] = _server_error_counts.get(server_name, 0) + 1
+                return json.dumps({
+                    "error": f"MCP server '{server_name}' connection failed"
+                }, ensure_ascii=False)
 
         async def _call():
             result = await server.session.call_tool(tool_name, arguments=args)
@@ -1942,9 +2001,18 @@ def _make_check_fn(server_name: str):
     """Return a check function that verifies the MCP connection is alive."""
 
     def _check() -> bool:
+        # 首先检查是否已连接
         with _lock:
             server = _servers.get(server_name)
-        return server is not None and server.session is not None
+        if server and server.session:
+            return True
+        
+        # 如果未连接，尝试懒加载连接（但不阻塞太久）
+        # 这里使用较短的超时时间，因为check_fn可能在启动时被调用
+        try:
+            return _ensure_server_connected(server_name)
+        except Exception:
+            return False
 
     return _check
 
@@ -2408,6 +2476,120 @@ def discover_mcp_tools() -> List[str]:
     return tool_names
 
 
+def discover_mcp_tools_lazy() -> List[str]:
+    """懒加载版本的MCP工具发现：只注册工具schema，不实际连接服务器。
+    
+    这个函数在启动时被调用，只注册MCP工具的schema到注册表，
+    实际连接会延迟到第一次使用MCP工具时。
+    
+    Returns:
+        List of registered MCP tool names (from config, not actual connection).
+    """
+    if not _MCP_AVAILABLE:
+        logger.debug("MCP SDK not available -- skipping lazy MCP tool discovery")
+        return []
+    
+    # 导入registry
+    from tools.registry import registry
+    
+    servers = _load_mcp_config()
+    if not servers:
+        logger.debug("No MCP servers configured for lazy discovery")
+        return []
+    
+    registered_names = []
+    
+    for server_name, config in servers.items():
+        # 检查是否启用
+        if not _parse_boolish(config.get("enabled", True), default=True):
+            continue
+        
+        # 为每个服务器创建工具schema
+        # 注意：这里我们不知道服务器实际有哪些工具，所以创建占位工具
+        # 实际工具会在连接时通过_register_server_tools函数注册
+        safe_name = sanitize_mcp_name_component(server_name)
+        
+        # 注册占位工具，让用户知道这个MCP服务器可用
+        # 实际的工具会在连接时替换
+        placeholder_tool_name = f"mcp_{safe_name}_placeholder"
+        try:
+            # 为占位工具创建一个简单的check_fn，不尝试连接
+            def _placeholder_check_fn():
+                return True
+            
+            registry.register(
+                name=placeholder_tool_name,
+                toolset=f"mcp-{safe_name}",
+                schema={
+                    "name": placeholder_tool_name,
+                    "description": f"MCP server '{server_name}' placeholder (will be replaced with actual tools on first use)",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+                handler=_make_placeholder_handler(server_name),
+                check_fn=_placeholder_check_fn,  # 使用简单的check_fn
+                is_async=False,
+                description=f"MCP server '{server_name}' placeholder",
+            )
+            registered_names.append(placeholder_tool_name)
+        except Exception as e:
+            logger.error(f"Failed to register placeholder for MCP server '{server_name}': {e}")
+        
+        # 注册工具集别名
+        registry.register_toolset_alias(server_name, f"mcp-{safe_name}")
+    
+    if registered_names:
+        logger.debug(f"Lazy MCP discovery: registered {len(registered_names)} placeholder(s)")
+    
+    return registered_names
+
+
+def _make_placeholder_handler(server_name: str):
+    """创建占位工具处理器，在第一次调用时触发真正的MCP工具发现。"""
+    def _handler(args: dict, **kwargs) -> str:
+        # 这个占位工具被调用时，说明用户想要使用这个MCP服务器
+        # 此时触发真正的连接和工具发现
+        try:
+            # 尝试连接服务器并注册真正的工具
+            servers_config = _load_mcp_config()
+            if server_name not in servers_config:
+                return json.dumps({
+                    "error": f"MCP server '{server_name}' not found in config"
+                }, ensure_ascii=False)
+            
+            server_config = servers_config[server_name]
+            
+            # 确保事件循环已启动
+            _ensure_mcp_loop()
+            
+            # 连接服务器并注册真正的工具
+            async def _connect_and_register():
+                return await _discover_and_register_server(server_name, server_config)
+            
+            # 连接可能需要一些时间
+            connect_timeout = server_config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+            result = _run_on_mcp_loop(_connect_and_register(), timeout=connect_timeout)
+            
+            # 获取服务器上注册的真正工具
+            with _lock:
+                server = _servers.get(server_name)
+            if server and hasattr(server, "_registered_tool_names"):
+                tools = server._registered_tool_names
+                return json.dumps({
+                    "result": f"MCP server '{server_name}' connected successfully. Available tools: {', '.join(tools)}"
+                }, ensure_ascii=False)
+            else:
+                return json.dumps({
+                    "result": f"MCP server '{server_name}' connected but no tools found"
+                }, ensure_ascii=False)
+                
+        except Exception as e:
+            return json.dumps({
+                "error": f"Failed to connect to MCP server '{server_name}': {str(e)}"
+            }, ensure_ascii=False)
+    
+    return _handler
+
+
 def get_mcp_status() -> List[dict]:
     """Return status of all configured MCP servers for banner display.
 
@@ -2443,6 +2625,7 @@ def get_mcp_status() -> List[dict]:
                 "transport": transport,
                 "tools": 0,
                 "connected": False,
+                "lazy": True,  # 懒加载模式：尚未连接，使用时自动连接
             })
 
     return result

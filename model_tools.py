@@ -132,11 +132,19 @@ def _run_async(coro):
 discover_builtin_tools()
 
 # MCP tool discovery (external MCP servers from config)
+# 注释掉启动时的MCP工具发现，改为懒加载（首次使用时连接）
+# try:
+#     from tools.mcp_tool import discover_mcp_tools
+#     discover_mcp_tools()
+# except Exception as e:
+#     logger.debug("MCP tool discovery failed: %s", e)
+
+# 懒加载MCP工具发现：只注册占位工具，不实际连接服务器
 try:
-    from tools.mcp_tool import discover_mcp_tools
-    discover_mcp_tools()
+    from tools.mcp_tool import discover_mcp_tools_lazy
+    discover_mcp_tools_lazy()
 except Exception as e:
-    logger.debug("MCP tool discovery failed: %s", e)
+    logger.debug("Lazy MCP tool discovery failed: %s", e)
 
 # Plugin tool discovery (user/project/pip plugins)
 try:

@@ -466,6 +466,12 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                     f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
                     f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
                 )
+            elif srv.get("lazy"):
+                # 懒加载模式：显示待连接提示
+                right_lines.append(
+                    f"[dim {dim}]{srv['name']}[/] [dim]({srv['transport']})[/] "
+                    f"[dim]— lazy load[/]"
+                )
             else:
                 right_lines.append(
                     f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "

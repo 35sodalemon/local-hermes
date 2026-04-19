@@ -2293,6 +2293,7 @@ class DiscordAdapter(BasePlatformAdapter):
         hidden skills. The slash picker also becomes more discoverable —
         Discord live-filters by the user's typed prefix against both the
         skill name and its description.
+        """
 
         import json as _json
         import os
