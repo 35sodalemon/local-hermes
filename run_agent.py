@@ -6334,9 +6334,9 @@ class AIAgent:
                                     e,
                                 )
                                 self._emit_status(
-                                    f"⚠️ Connection to provider dropped "
-                                    f"({type(e).__name__}). Reconnecting… "
-                                    f"(attempt {_stream_attempt + 2}/{_max_stream_retries + 1})"
+                                    f"⚠️ 与供应商的连接已断开 "
+                                    f"({type(e).__name__})。正在重新连接… "
+                                    f"（第 {_stream_attempt + 2}/{_max_stream_retries + 1} 次）"
                                 )
                                 self._touch_activity(
                                     f"stream retry {_stream_attempt + 2}/{_max_stream_retries + 1} "
@@ -6357,7 +6357,7 @@ class AIAgent:
                                     )
                                 except Exception:
                                     pass
-                                self._emit_status("🔄 Reconnected — resuming…")
+                                self._emit_status("🔄 已重新连接 — 正在恢复…")
                                 continue
                             self._emit_status(
                                 "❌ Connection to provider failed after "
@@ -9354,7 +9354,7 @@ class AIAgent:
             elif not self.iteration_budget.consume():
                 _turn_exit_reason = "budget_exhausted"
                 if not self.quiet_mode:
-                    self._safe_print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
+                    self._safe_print(f"\n⚠️  迭代次数已用尽（已用 {self.iteration_budget.used}/{self.iteration_budget.max_total} 次）")
                 break
 
             # Fire step_callback for gateway hooks (agent:step event)
@@ -9846,21 +9846,21 @@ class AIAgent:
                         else:
                             _failure_hint = f"response time {api_duration:.1f}s"
 
-                        self._vprint(f"{self.log_prefix}⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}", force=True)
-                        self._vprint(f"{self.log_prefix}   🏢 Provider: {provider_name}", force=True)
+                        self._vprint(f"{self.log_prefix}⚠️  无效的 API 响应（第 {retry_count}/{max_retries} 次）：{', '.join(error_details)}", force=True)
+                        self._vprint(f"{self.log_prefix}   🏢 供应商：{provider_name}", force=True)
                         cleaned_provider_error = self._clean_error_message(error_msg)
-                        self._vprint(f"{self.log_prefix}   📝 Provider message: {cleaned_provider_error}", force=True)
+                        self._vprint(f"{self.log_prefix}   📝 供应商消息：{cleaned_provider_error}", force=True)
                         self._vprint(f"{self.log_prefix}   ⏱️  {_failure_hint}", force=True)
                         
                         if retry_count >= max_retries:
                             # Try fallback before giving up
-                            self._emit_status(f"⚠️ Max retries ({max_retries}) for invalid responses — trying fallback...")
+                            self._emit_status(f"⚠️ 无效响应已重试 {max_retries} 次 — 正在尝试备用方案...")
                             if self._try_activate_fallback():
                                 retry_count = 0
                                 compression_attempts = 0
                                 primary_recovery_attempted = False
                                 continue
-                            self._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
+                            self._emit_status(f"❌ 无效响应已重试 {max_retries} 次，已放弃。")
                             logging.error(f"{self.log_prefix}Invalid API response after {max_retries} retries.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -9873,7 +9873,7 @@ class AIAgent:
                         
                         # Backoff before retry — jittered exponential: 5s base, 120s cap
                         wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
-                        self._vprint(f"{self.log_prefix}⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...", force=True)
+                        self._vprint(f"{self.log_prefix}⏳ 正在重试，等待 {wait_time:.1f}秒（{_failure_hint}）...", force=True)
                         logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
                         
                         # Sleep in small increments to stay responsive to interrupts
@@ -10544,10 +10544,10 @@ class AIAgent:
                     _base = getattr(self, "base_url", "unknown")
                     _model = getattr(self, "model", "unknown")
                     _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-                    self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}", force=True)
-                    self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                    self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                    self._vprint(f"{self.log_prefix}   📝 Error: {_error_summary}", force=True)
+                    self._vprint(f"{self.log_prefix}⚠️  API 调用失败（第 {retry_count}/{max_retries} 次）：{error_type}{_status_code_str}", force=True)
+                    self._vprint(f"{self.log_prefix}   🔌 供应商：{_provider}  模型：{_model}", force=True)
+                    self._vprint(f"{self.log_prefix}   🌐 端点：{_base}", force=True)
+                    self._vprint(f"{self.log_prefix}   📝 错误：{_error_summary}", force=True)
                     if status_code and status_code < 500:
                         _err_body = getattr(api_error, "body", None)
                         _err_body_str = str(_err_body)[:300] if _err_body else None
@@ -10930,7 +10930,7 @@ class AIAgent:
                     if is_client_error:
                         # Try fallback before aborting — a different provider
                         # may not have the same issue (rate limit, auth, etc.)
-                        self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+                        self._emit_status(f"⚠️ 不可重试的错误（HTTP {status_code}）— 正在尝试备用方案...")
                         if self._try_activate_fallback():
                             retry_count = 0
                             compression_attempts = 0
@@ -10941,12 +10941,12 @@ class AIAgent:
                                 api_kwargs, reason="non_retryable_client_error", error=api_error,
                             )
                         self._emit_status(
-                            f"❌ Non-retryable error (HTTP {status_code}): "
+                            f"❌ 不可重试的错误（HTTP {status_code}）："
                             f"{self._summarize_api_error(api_error)}"
                         )
-                        self._vprint(f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
-                        self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                        self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                        self._vprint(f"{self.log_prefix}❌ 不可重试的客户端错误（HTTP {status_code}），正在中止。", force=True)
+                        self._vprint(f"{self.log_prefix}   🔌 供应商：{_provider}  模型：{_model}", force=True)
+                        self._vprint(f"{self.log_prefix}   🌐 端点：{_base}", force=True)
                         # Actionable guidance for common auth errors
                         if classified.is_auth or classified.reason == FailoverReason.billing:
                             if _provider == "openai-codex" and status_code == 401:
@@ -11081,9 +11081,9 @@ class AIAgent:
                                     pass
                     wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                     if is_rate_limited:
-                        self._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
+                        self._emit_status(f"⏱️ 触发速率限制。等待 {wait_time:.1f}秒后重试（第 {retry_count + 1}/{max_retries} 次）...")
                     else:
-                        self._emit_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
+                        self._emit_status(f"⏳ 正在重试，等待 {wait_time:.1f}秒（第 {retry_count}/{max_retries} 次）...")
                     logger.warning(
                         "Retrying API call in %ss (attempt %s/%s) %s error=%s",
                         wait_time,
@@ -11975,13 +11975,13 @@ class AIAgent:
             # user message and makes a single toolless request.
             _turn_exit_reason = f"max_iterations_reached({api_call_count}/{self.max_iterations})"
             self._emit_status(
-                f"⚠️ Iteration budget exhausted ({api_call_count}/{self.max_iterations}) "
-                "— asking model to summarise"
+                f"⚠️ 迭代次数已用尽（{api_call_count}/{self.max_iterations}）"
+                "— 正在请求模型总结"
             )
             if not self.quiet_mode:
                 self._safe_print(
-                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{self.max_iterations}) "
-                    "— requesting summary..."
+                    f"\n⚠️  迭代次数已用尽（{api_call_count}/{self.max_iterations}）"
+                    "— 正在请求总结..."
                 )
             final_response = self._handle_max_iterations(messages, api_call_count)
         
