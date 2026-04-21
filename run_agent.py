@@ -7731,7 +7731,7 @@ class AIAgent:
             for tc in tool_calls:
                 messages.append({
                     "role": "tool",
-                    "content": f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
+                    "content": f"[工具执行已取消 — {tc.function.name} 因用户中断而被跳过]",
                     "tool_call_id": tc.id,
                 })
             return
@@ -7938,7 +7938,7 @@ class AIAgent:
             if r is None:
                 # Tool was cancelled (interrupt) or thread didn't return
                 if self._interrupt_requested:
-                    function_result = f"[Tool execution cancelled — {name} was skipped due to user interrupt]"
+                    function_result = f"[工具执行已取消 — {name} 因用户中断而被跳过]"
                 else:
                     function_result = f"执行工具 '{name}' 时出错：线程未返回结果"
                 tool_duration = 0.0
@@ -8033,7 +8033,7 @@ class AIAgent:
                     skipped_name = skipped_tc.function.name
                     skip_msg = {
                         "role": "tool",
-                        "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
+                        "content": f"[工具执行已取消 — {skipped_name} 因用户中断而被跳过]",
                         "tool_call_id": skipped_tc.id,
                     }
                     messages.append(skip_msg)
