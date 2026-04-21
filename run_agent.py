@@ -11155,7 +11155,7 @@ class AIAgent:
                                     tool_result = (
                                         f"错误：无效的 JSON 参数。{err}。 "
                                         f"For tools with no required parameters, use an empty object: {{}}. "
-                                        f"Please retry with valid JSON."
+                                        f"请使用有效的 JSON 重试。"
                                     )
                                 else:
                                     tool_result = "Skipped: other tool call in this response had invalid JSON."
