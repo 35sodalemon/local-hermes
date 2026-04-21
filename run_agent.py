@@ -7940,7 +7940,7 @@ class AIAgent:
                 if self._interrupt_requested:
                     function_result = f"[Tool execution cancelled — {name} was skipped due to user interrupt]"
                 else:
-                    function_result = f"执行工具 '{name}' 时出错：thread did not return a result"
+                    function_result = f"执行工具 '{name}' 时出错：线程未返回结果"
                 tool_duration = 0.0
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
