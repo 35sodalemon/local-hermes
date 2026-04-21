@@ -7135,7 +7135,7 @@ class HermesCLI:
         _reload_thread.start()
         _reload_thread.join(timeout=30)
         if _reload_thread.is_alive():
-            print("  ⚠️  MCP reload timed out (30s). Some servers may not have reconnected.")
+            print("  ⚠️  MCP 重新加载超时（30秒）。部分服务器可能未重新连接。")
 
     def _reload_mcp(self):
         """Reload MCP servers: disconnect all, re-read config.yaml, reconnect.
@@ -7739,7 +7739,7 @@ class HermesCLI:
         if self._voice_tts:
             from tools.tts_tool import check_tts_requirements
             if not check_tts_requirements():
-                _cprint(f"{_DIM}Warning: No TTS provider available. Install edge-tts or set API keys.{_RST}")
+                _cprint(f"{_DIM}警告：没有可用的 TTS 供应商。请安装 edge-tts 或设置 API 密钥。{_RST}")
 
         _cprint(f"{_ACCENT}Voice TTS {status}.{_RST}")
 

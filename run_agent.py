@@ -7845,7 +7845,7 @@ class AIAgent:
             try:
                 result = self._invoke_tool(function_name, function_args, effective_task_id, tool_call.id)
             except Exception as tool_error:
-                result = f"Error executing tool '{function_name}': {tool_error}"
+                result = f"执行工具 '{function_name}' 时出错：{tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
             duration = time.time() - start
             is_error, _ = _detect_tool_failure(function_name, result)
@@ -7940,7 +7940,7 @@ class AIAgent:
                 if self._interrupt_requested:
                     function_result = f"[Tool execution cancelled — {name} was skipped due to user interrupt]"
                 else:
-                    function_result = f"Error executing tool '{name}': thread did not return a result"
+                    function_result = f"执行工具 '{name}' 时出错：thread did not return a result"
                 tool_duration = 0.0
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
@@ -8293,7 +8293,7 @@ class AIAgent:
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
+                    function_result = f"执行工具 '{function_name}' 时出错：{tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 finally:
                     tool_duration = time.time() - tool_start_time
@@ -8312,7 +8312,7 @@ class AIAgent:
                         skip_pre_tool_call_hook=True,
                     )
                 except Exception as tool_error:
-                    function_result = f"Error executing tool '{function_name}': {tool_error}"
+                    function_result = f"执行工具 '{function_name}' 时出错：{tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
 
@@ -8414,7 +8414,7 @@ class AIAgent:
 
     def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
         """Request a summary when max iterations are reached. Returns the final response text."""
-        print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
+        print(f"⚠️  迭代次数已用尽（{self.max_iterations} 次）。正在请求总结...")
 
         summary_request = (
             "You've reached the maximum number of tool-calling iterations allowed. "
@@ -8575,7 +8575,7 @@ class AIAgent:
 
         except Exception as e:
             logging.warning(f"Failed to get summary response: {e}")
-            final_response = f"I reached the maximum iterations ({self.max_iterations}) but couldn't summarize. Error: {str(e)}"
+            final_response = f"已达到最大迭代次数（{self.max_iterations} 次）但无法生成总结。错误：{str(e)}"
 
         return final_response
 
@@ -11647,7 +11647,7 @@ class AIAgent:
                                 err_msg = {
                                     "role": "tool",
                                     "tool_call_id": tc["id"],
-                                    "content": f"Error executing tool: {error_msg}",
+                                    "content": f"执行工具时出错：{error_msg}",
                                 }
                                 messages.append(err_msg)
                     break
