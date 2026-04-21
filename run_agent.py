@@ -11154,7 +11154,7 @@ class AIAgent:
                                     err = next(e for n, e in invalid_json_args if n == tc.function.name)
                                     tool_result = (
                                         f"错误：无效的 JSON 参数。{err}。 "
-                                        f"For tools with no required parameters, use an empty object: {{}}. "
+                                        f"对于无需参数的工具，请使用空对象：{{}}。 "
                                         f"请使用有效的 JSON 重试。"
                                     )
                                 else:
