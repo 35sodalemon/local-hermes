@@ -11153,7 +11153,7 @@ class AIAgent:
                                 if tc.function.name in invalid_names:
                                     err = next(e for n, e in invalid_json_args if n == tc.function.name)
                                     tool_result = (
-                                        f"Error: Invalid JSON arguments. {err}. "
+                                        f"错误：无效的 JSON 参数。{err}。 "
                                         f"For tools with no required parameters, use an empty object: {{}}. "
                                         f"Please retry with valid JSON."
                                     )
