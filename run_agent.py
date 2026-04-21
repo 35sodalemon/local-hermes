@@ -11158,7 +11158,7 @@ class AIAgent:
                                         f"请使用有效的 JSON 重试。"
                                     )
                                 else:
-                                    tool_result = "Skipped: other tool call in this response had invalid JSON."
+                                    tool_result = "已跳过：此响应中的其他工具调用包含无效的 JSON。"
                                 messages.append({
                                     "role": "tool",
                                     "tool_call_id": tc.id,
