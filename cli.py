@@ -26,6 +26,7 @@ import tempfile
 import time
 import uuid
 import textwrap
+from urllib.parse import unquote, urlparse
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
@@ -370,7 +371,6 @@ def load_cli_config() -> Dict[str, Any]:
         },
         "delegation": {
             "max_iterations": 45,  # Max tool-calling turns per child agent
-            "default_toolsets": ["terminal", "file", "web"],  # Default toolsets for subagents
             "model": "",       # Subagent model override (empty = inherit parent model)
             "provider": "",    # Subagent provider override (empty = inherit parent provider)
             "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
@@ -1154,11 +1154,11 @@ def _strip_markdown_syntax(text: str) -> str:
     plain = re.sub(r"!\[([^\]]*)\]\([^\)]*\)", r"\1", plain)
     plain = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", plain)
     plain = re.sub(r"\*\*\*([^*]+)\*\*\*", r"\1", plain)
-    plain = re.sub(r"___([^_]+)___", r"\1", plain)
+    plain = re.sub(r"(?<!\w)___([^_]+)___(?!\w)", r"\1", plain)
     plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", plain)
-    plain = re.sub(r"__([^_]+)__", r"\1", plain)
+    plain = re.sub(r"(?<!\w)__([^_]+)__(?!\w)", r"\1", plain)
     plain = re.sub(r"\*([^*]+)\*", r"\1", plain)
-    plain = re.sub(r"_([^_]+)_", r"\1", plain)
+    plain = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", plain)
     plain = re.sub(r"~~([^~]+)~~", r"\1", plain)
     plain = re.sub(r"\n{3,}", "\n\n", plain)
     return plain.strip("\n")
@@ -1271,10 +1271,21 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
 
     if (token.startswith('"') and token.endswith('"')) or (token.startswith("'") and token.endswith("'")):
         token = token[1:-1].strip()
+    token = token.replace('\\ ', ' ')
     if not token:
         return None
 
-    expanded = os.path.expandvars(os.path.expanduser(token))
+    expanded = token
+    if token.startswith("file://"):
+        try:
+            parsed = urlparse(token)
+            if parsed.scheme == "file":
+                expanded = unquote(parsed.path or "")
+                if parsed.netloc and os.name == "nt":
+                    expanded = f"//{parsed.netloc}{expanded}"
+        except Exception:
+            expanded = token
+    expanded = os.path.expandvars(os.path.expanduser(expanded))
     if os.name != "nt":
         normalized = expanded.replace("\\", "/")
         if len(normalized) >= 3 and normalized[1] == ":" and normalized[2] == "/" and normalized[0].isalpha():
@@ -1361,6 +1372,7 @@ def _detect_file_drop(user_input: str) -> "dict | None":
         or stripped.startswith("~")
         or stripped.startswith("./")
         or stripped.startswith("../")
+        or stripped.startswith("file://")
         or (len(stripped) >= 3 and stripped[1] == ":" and stripped[2] in ("\\", "/") and stripped[0].isalpha())
         or stripped.startswith('"/')
         or stripped.startswith('"~')
@@ -1371,8 +1383,25 @@ def _detect_file_drop(user_input: str) -> "dict | None":
     if not starts_like_path:
         return None
 
+    direct_path = _resolve_attachment_path(stripped)
+    if direct_path is not None:
+        return {
+            "path": direct_path,
+            "is_image": direct_path.suffix.lower() in _IMAGE_EXTENSIONS,
+            "remainder": "",
+        }
+
     first_token, remainder = _split_path_input(stripped)
     drop_path = _resolve_attachment_path(first_token)
+    if drop_path is None and " " in stripped and stripped[0] not in {"'", '"'}:
+        space_positions = [idx for idx, ch in enumerate(stripped) if ch == " "]
+        for pos in reversed(space_positions):
+            candidate = stripped[:pos].rstrip()
+            resolved = _resolve_attachment_path(candidate)
+            if resolved is not None:
+                drop_path = resolved
+                remainder = stripped[pos + 1 :].strip()
+                break
     if drop_path is None:
         return None
 
@@ -8339,6 +8368,17 @@ class HermesCLI:
 
             def run_agent():
                 nonlocal result
+                # Set callbacks inside the agent thread so thread-local storage
+                # in terminal_tool is populated for this thread.  The main thread
+                # registration (run() line ~9046) is invisible here because
+                # _callback_tls is threading.local().  Matches the pattern used
+                # by acp_adapter/server.py for ACP sessions.
+                set_sudo_password_callback(self._sudo_password_callback)
+                set_approval_callback(self._approval_callback)
+                try:
+                    set_secret_capture_callback(self._secret_capture_callback)
+                except Exception:
+                    pass
                 agent_message = _voice_prefix + message if _voice_prefix else message
                 # Prepend pending model switch note so the model knows about the switch
                 _msn = getattr(self, '_pending_model_switch_note', None)
@@ -8364,6 +8404,15 @@ class HermesCLI:
                         "failed": True,
                         "error": _summary,
                     }
+                finally:
+                    # Clear thread-local callbacks so a reused thread doesn't
+                    # hold stale references to a disposed CLI instance.
+                    try:
+                        set_sudo_password_callback(None)
+                        set_approval_callback(None)
+                        set_secret_capture_callback(None)
+                    except Exception:
+                        pass
 
             # Start agent in background thread (daemon so it cannot keep the
             # process alive when the user closes the terminal tab — SIGHUP

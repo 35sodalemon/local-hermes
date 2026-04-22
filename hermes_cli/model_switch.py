@@ -143,7 +143,7 @@ MODEL_ALIASES: dict[str, ModelIdentity] = {
     # Z.AI / GLM
     "glm":       ModelIdentity("z-ai", "glm"),
 
-    # StepFun
+    # Step Plan (StepFun)
     "step":      ModelIdentity("stepfun", "step"),
 
     # Xiaomi
@@ -678,6 +678,7 @@ def switch_model(
         _da = DIRECT_ALIASES.get(resolved_alias)
         if _da is not None and _da.base_url:
             base_url = _da.base_url
+            api_mode = ""  # clear so determine_api_mode re-detects from URL
             if not api_key:
                 api_key = "no-key-required"
 

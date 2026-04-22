@@ -94,6 +94,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="KIMI_BASE_URL",
     ),
+    "stepfun": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("STEPFUN_API_KEY",),
+        base_url_override="https://api.stepfun.ai/step_plan/v1",
+        base_url_env_var="STEPFUN_BASE_URL",
+    ),
     "minimax": HermesOverlay(
         transport="anthropic_messages",
         base_url_env_var="MINIMAX_BASE_URL",
@@ -210,6 +216,10 @@ ALIASES: Dict[str, str] = {
     "kimi-coding-cn": "kimi-for-coding",
     "moonshot": "kimi-for-coding",
 
+    # stepfun
+    "step": "stepfun",
+    "stepfun-coding-plan": "stepfun",
+
     # minimax-cn
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
@@ -294,6 +304,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
@@ -427,6 +438,16 @@ def determine_api_mode(provider: str, base_url: str = "") -> str:
     """
     pdef = get_provider(provider)
     if pdef is not None:
+        # Even for known providers, check URL heuristics for special endpoints
+        # (e.g. kimi /coding endpoint needs anthropic_messages even on 'custom')
+        if base_url:
+            url_lower = base_url.rstrip("/").lower()
+            if "api.kimi.com/coding" in url_lower:
+                return "anthropic_messages"
+            if url_lower.endswith("/anthropic") or "api.anthropic.com" in url_lower:
+                return "anthropic_messages"
+            if "api.openai.com" in url_lower:
+                return "codex_responses"
         return TRANSPORT_TO_API_MODE.get(pdef.transport, "chat_completions")
 
     # Direct provider checks for providers not in HERMES_OVERLAYS
@@ -438,6 +459,8 @@ def determine_api_mode(provider: str, base_url: str = "") -> str:
         url_lower = base_url.rstrip("/").lower()
         hostname = base_url_hostname(base_url)
         if url_lower.endswith("/anthropic") or hostname == "api.anthropic.com":
+            return "anthropic_messages"
+        if hostname == "api.kimi.com" and "/coding" in url_lower:
             return "anthropic_messages"
         if hostname == "api.openai.com":
             return "codex_responses"
