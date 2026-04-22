@@ -2305,6 +2305,11 @@ class HermesCLI:
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
                 parts.append(prompt_elapsed)
+            # 末尾显示短session ID，方便会话丢失时快速识别
+            sid = getattr(self, "session_id", None)
+            if sid:
+                short_id = sid.rsplit("_", 1)[-1] if "_" in sid else sid[-6:]
+                parts.append(f"#{short_id}")
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
@@ -2369,6 +2374,12 @@ class HermesCLI:
                     if prompt_elapsed:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-dim", prompt_elapsed))
+                    # 末尾显示短session ID，方便会话丢失时快速识别
+                    sid = getattr(self, "session_id", None)
+                    if sid:
+                        short_id = sid.rsplit("_", 1)[-1] if "_" in sid else sid[-6:]
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-dim", f"#{short_id}"))
                     frags.append(("class:status-bar", " "))
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)

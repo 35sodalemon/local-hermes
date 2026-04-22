@@ -1259,7 +1259,7 @@ class AIAgent:
                     if key_used and key_used != "dummy-key" and len(key_used) > 12:
                         print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
                     else:
-                        print(f"⚠️  Warning: API key appears invalid or missing (got: '{key_used[:20] if key_used else 'none'}...')")
+                        print(f"⚠️  警告：API 密钥似乎无效或缺失（已获取：'{key_used[:20] if key_used else 'none'}...'）")
             except Exception as e:
                 raise RuntimeError(f"Failed to initialize OpenAI client: {e}")
         
@@ -1307,7 +1307,7 @@ class AIAgent:
                 if enabled_toolsets:
                     print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
                 if disabled_toolsets:
-                    print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
+                    print(f"   ❌ 已禁用的工具集：{', '.join(disabled_toolsets)}")
         elif not self.quiet_mode:
             print("🛠️  No tools loaded (all tools filtered out or unavailable)")
         
@@ -1316,7 +1316,7 @@ class AIAgent:
             requirements = check_toolset_requirements()
             missing_reqs = [name for name, available in requirements.items() if not available]
             if missing_reqs:
-                print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
+                print(f"⚠️  部分工具可能因缺少依赖而无法使用：{missing_reqs}")
         
         # Show trajectory saving status
         if self.save_trajectories and not self.quiet_mode:
@@ -9445,7 +9445,7 @@ class AIAgent:
                             finish_reason = "length"
 
                     if finish_reason == "length":
-                        self._vprint(f"{self.log_prefix}⚠️  Response truncated (finish_reason='length') - model hit max output tokens", force=True)
+                        self._vprint(f"{self.log_prefix}⚠️  响应被截断（finish_reason='length'）— 模型达到最大输出 token 限制", force=True)
 
                         # Normalize the truncated response to a single OpenAI-style
                         # message shape so text-continuation and tool-call retry
@@ -9627,7 +9627,7 @@ class AIAgent:
                             }
                         else:
                             # First message was truncated - mark as failed
-                            self._vprint(f"{self.log_prefix}❌ First response truncated - cannot recover", force=True)
+                            self._vprint(f"{self.log_prefix}❌ 首次响应即被截断 — 无法恢复", force=True)
                             self._persist_session(messages, conversation_history)
                             return {
                                 "final_response": None,
@@ -9988,7 +9988,7 @@ class AIAgent:
                     ):
                         codex_auth_retry_attempted = True
                         if self._try_refresh_codex_client_credentials(force=True):
-                            self._vprint(f"{self.log_prefix}🔐 Codex auth refreshed after 401. Retrying request...")
+                            self._vprint(f"{self.log_prefix}🔐 Codex 认证在 401 后已刷新，正在重试请求...")
                             continue
                     if (
                         self.api_mode == "chat_completions"
@@ -10205,7 +10205,7 @@ class AIAgent:
                         pool = self._credential_pool
                         pool_may_recover = pool is not None and pool.has_available()
                         if not pool_may_recover:
-                            self._emit_status("⚠️ Rate limited — switching to fallback provider...")
+                            self._emit_status("⚠️ 触发速率限制 — 正在切换到备用供应商...")
                             if self._try_activate_fallback():
                                 retry_count = 0
                                 compression_attempts = 0
@@ -10251,8 +10251,8 @@ class AIAgent:
                     if is_payload_too_large:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                            self._vprint(f"{self.log_prefix}❌ 压缩尝试已达上限（{max_compression_attempts}次），无法解决负载过大错误。")
+                            self._vprint(f"{self.log_prefix}   💡 尝试 /new 开始新对话，或 /compress 重新压缩。", force=True)
                             logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -10283,7 +10283,7 @@ class AIAgent:
                             break
                         else:
                             self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 尝试 /new 开始新对话，或 /compress 重新压缩。", force=True)
                             logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -10335,8 +10335,8 @@ class AIAgent:
                             # loop forever if the error keeps recurring.
                             compression_attempts += 1
                             if compression_attempts > max_compression_attempts:
-                                self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                                self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                                self._vprint(f"{self.log_prefix}❌ 压缩尝试已达上限（{max_compression_attempts}次）。", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 尝试 /new 开始新对话，或 /compress 重新压缩。", force=True)
                                 logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
                                 self._persist_session(messages, conversation_history)
                                 return {
@@ -10387,8 +10387,8 @@ class AIAgent:
 
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                            self._vprint(f"{self.log_prefix}❌ 压缩尝试已达上限（{max_compression_attempts}次），无法解决负载过大错误。")
+                            self._vprint(f"{self.log_prefix}   💡 尝试 /new 开始新对话，或 /compress 重新压缩。", force=True)
                             logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
                             return {
@@ -10529,7 +10529,7 @@ class AIAgent:
                             retry_count = 0
                             continue
                         # Try fallback before giving up entirely
-                        self._emit_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
+                        self._emit_status(f"⚠️ 重试次数已耗尽（{max_retries}次）— 正在尝试备用方案...")
                         if self._try_activate_fallback():
                             retry_count = 0
                             compression_attempts = 0
@@ -10537,9 +10537,9 @@ class AIAgent:
                             continue
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:
-                            self._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+                            self._emit_status(f"❌ 速率限制，已重试 {max_retries} 次 — {_final_summary}")
                         else:
-                            self._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
+                            self._emit_status(f"❌ API 调用失败，已重试 {max_retries} 次 — {_final_summary}")
                         self._vprint(f"{self.log_prefix}   💀 Final error: {_final_summary}", force=True)
 
                         # Detect SSE stream-drop pattern (e.g. "Network
@@ -10557,17 +10557,14 @@ class AIAgent:
                         )
                         if _is_stream_drop:
                             self._vprint(
-                                f"{self.log_prefix}   💡 The provider's stream "
-                                f"connection keeps dropping. This often happens "
-                                f"when the model tries to write a very large "
-                                f"file in a single tool call.",
+                                f"{self.log_prefix}   💡 供应商的流式连接持续断开。"
+                                f"这通常发生在模型尝试"
+                                f"在单次工具调用中写入非常大的文件时。",
                                 force=True,
                             )
                             self._vprint(
-                                f"{self.log_prefix}      Try asking the model "
-                                f"to use execute_code with Python's open() for "
-                                f"large files, or to write the file in smaller "
-                                f"sections.",
+                                f"{self.log_prefix}      建议让模型使用 execute_code 的 Python open() "
+                                f"来写入大文件，或分多次写入较小的段落。",
                                 force=True,
                             )
 
@@ -10581,15 +10578,12 @@ class AIAgent:
                                 api_kwargs, reason="max_retries_exhausted", error=api_error,
                             )
                         self._persist_session(messages, conversation_history)
-                        _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
+                        _final_response = f"API 调用失败，已重试 {max_retries} 次: {_final_summary}"
                         if _is_stream_drop:
                             _final_response += (
-                                "\n\nThe provider's stream connection keeps "
-                                "dropping — this often happens when generating "
-                                "very large tool call responses (e.g. write_file "
-                                "with long content). Try asking me to use "
-                                "execute_code with Python's open() for large "
-                                "files, or to write in smaller sections."
+                                "\n\n供应商的流式连接持续断开，"
+                                "这通常发生在生成非常大的工具调用响应时。"
+                                "建议使用 execute_code 的 Python open() 写入大文件，或分多次写入较小段落。"
                             )
                         return {
                             "final_response": _final_response,
@@ -10828,15 +10822,15 @@ class AIAgent:
                 if has_incomplete_scratchpad(assistant_message.content or ""):
                     self._incomplete_scratchpad_retries += 1
                     
-                    self._vprint(f"{self.log_prefix}⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
+                    self._vprint(f"{self.log_prefix}⚠️  检测到不完整的 <REASONING_SCRATCHPAD>（已打开但未关闭）")
                     
                     if self._incomplete_scratchpad_retries <= 2:
-                        self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._incomplete_scratchpad_retries}/2)...")
+                        self._vprint(f"{self.log_prefix}🔄 正在重试 API 调用（不完整输出重试 {self._incomplete_scratchpad_retries}/2）...")
                         # Don't add the broken message, just retry
                         continue
                     else:
                         # Max retries - discard this turn and save as partial
-                        self._vprint(f"{self.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.", force=True)
+                        self._vprint(f"{self.log_prefix}❌ 不完整输出重试已达上限（2次），保存为部分结果。", force=True)
                         self._incomplete_scratchpad_retries = 0
                         
                         rolled_back_messages = self._get_messages_up_to_last_assistant(messages)
@@ -10936,7 +10930,7 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/3)")
 
                         if self._invalid_tool_retries >= 3:
-                            self._vprint(f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
+                            self._vprint(f"{self.log_prefix}❌ 无效工具调用重试已达上限（3次），停止并保存为部分结果。", force=True)
                             self._invalid_tool_retries = 0
                             self._persist_session(messages, conversation_history)
                             return {
@@ -11018,10 +11012,10 @@ class AIAgent:
                         self._invalid_json_retries += 1
 
                         tool_name, error_msg = invalid_json_args[0]
-                        self._vprint(f"{self.log_prefix}⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}")
+                        self._vprint(f"{self.log_prefix}⚠️  工具调用参数 JSON 无效（'{tool_name}'）：{error_msg}")
 
                         if self._invalid_json_retries < 3:
-                            self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._invalid_json_retries}/3)...")
+                            self._vprint(f"{self.log_prefix}🔄 正在重试 API 调用（无效 JSON 重试 {self._invalid_json_retries}/3）...")
                             # Don't add anything to messages, just retry the API call
                             continue
                         else:
@@ -11923,7 +11917,7 @@ def main(
             log_prefix_chars=log_prefix_chars
         )
     except RuntimeError as e:
-        print(f"❌ Failed to initialize agent: {e}")
+        print(f"❌ 初始化代理失败: {e}")
         return
     
     # Use provided query or default to Python 3.13 example
