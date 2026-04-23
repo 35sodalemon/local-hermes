@@ -3288,6 +3288,16 @@ class AIAgent:
         <title> tag instead of dumping raw HTML.  Falls back to a truncated
         str(error) for everything else.
         """
+        # 常见错误信息翻译映射
+        error_translations = {
+            "The service may be temporarily overloaded, please try again later": "服务可能暂时过载，请稍后重试",
+            "Rate limit exceeded": "超出速率限制",
+            "insufficient_quota": "配额不足",
+            "Invalid API key": "API 密钥无效",
+            "Model not found": "模型未找到",
+            "Too many requests": "请求过多",
+        }
+        
         raw = str(error)
 
         # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
@@ -3313,12 +3323,16 @@ class AIAgent:
             if msg:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
-                return f"{prefix}{msg[:300]}"
+                # 尝试翻译
+                translated = error_translations.get(msg, msg)
+                return f"{prefix}{translated[:300]}"
 
         # Fallback: truncate the raw string but give more room than 200 chars
         status_code = getattr(error, "status_code", None)
         prefix = f"HTTP {status_code}: " if status_code else ""
-        return f"{prefix}{raw[:500]}"
+        # 尝试翻译
+        translated = error_translations.get(raw, raw)
+        return f"{prefix}{translated[:500]}"
 
     def _mask_api_key_for_logs(self, key: Optional[str]) -> Optional[str]:
         if not key:
@@ -3658,7 +3672,7 @@ class AIAgent:
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:
-            print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
+            print("\n⚡ 已请求中断" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
     
     def clear_interrupt(self) -> None:
         """Clear any pending interrupt request and the per-thread tool interrupt signal."""
@@ -5312,9 +5326,9 @@ class AIAgent:
                     api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
                 )
                 self._emit_status(
-                    f"⚠️ No response from provider for {int(_elapsed)}s "
-                    f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Aborting call."
+                    f"⚠️ 供应商 {int(_elapsed)}秒 无响应 "
+                    f"(非流式, 模型: {api_kwargs.get('model', 'unknown')}). "
+                    f"正在中止调用。"
                 )
                 try:
                     if self.api_mode == "anthropic_messages":
@@ -5981,9 +5995,9 @@ class AIAgent:
                             deltas_were_sent["yes"] = False
                             first_delta_fired["done"] = False
                             self._emit_status(
-                                f"⚠️ Connection dropped mid tool-call "
-                                f"({type(e).__name__}). Reconnecting… "
-                                f"(attempt {_stream_attempt + 2}/{_max_stream_retries + 1})"
+                                f"⚠️ 工具调用期间连接断开 "
+                                f"({type(e).__name__}). 正在重新连接… "
+                                f"(第 {_stream_attempt + 2}/{_max_stream_retries + 1} 次)"
                             )
                             self._touch_activity(
                                 f"stream retry {_stream_attempt + 2}/{_max_stream_retries + 1} "
@@ -6001,7 +6015,7 @@ class AIAgent:
                                 )
                             except Exception:
                                 pass
-                            self._emit_status("🔄 Reconnected — resuming…")
+                            self._emit_status("🔄 已重新连接 — 正在恢复…")
                             continue
 
                         # SSE error events from proxies (e.g. OpenRouter sends
@@ -6073,10 +6087,10 @@ class AIAgent:
                                 self._emit_status("🔄 已重新连接 — 正在恢复…")
                                 continue
                             self._emit_status(
-                                "❌ Connection to provider failed after "
-                                f"{_max_stream_retries + 1} attempts. "
-                                "The provider may be experiencing issues — "
-                                "try again in a moment."
+                                "❌ 供应商连接失败，已重试 "
+                                f"{_max_stream_retries + 1} 次。"
+                                "供应商可能正在故障中 — "
+                                "请稍后再试。"
                             )
                             logger.warning(
                                 "Streaming exhausted %s retries on transient error: %s",
@@ -6171,10 +6185,10 @@ class AIAgent:
                     api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
                 )
                 self._emit_status(
-                    f"⚠️ No response from provider for {int(_stale_elapsed)}s "
-                    f"(model: {api_kwargs.get('model', 'unknown')}, "
-                    f"context: ~{_est_ctx:,} tokens). "
-                    f"Reconnecting..."
+                    f"⚠️ 供应商 {int(_stale_elapsed)}秒 无响应 "
+                    f"(模型: {api_kwargs.get('model', 'unknown')}, "
+                    f"上下文: ~{_est_ctx:,} tokens). "
+                    f"正在重新连接..."
                 )
                 try:
                     rc = request_client_holder.get("client")
@@ -6445,8 +6459,8 @@ class AIAgent:
                 )
 
             self._emit_status(
-                f"🔄 Primary model failed — switching to fallback: "
-                f"{fb_model} via {fb_provider}"
+                f"🔄 主模型失败 — 正在切换到备用方案: "
+                f"{fb_model} (via {fb_provider})"
             )
             logging.info(
                 "Fallback activated: %s → %s (%s)",
@@ -7775,7 +7789,7 @@ class AIAgent:
 
         # ── Pre-flight: interrupt check ──────────────────────────────────
         if self._interrupt_requested:
-            print(f"{self.log_prefix}⚡ Interrupt: skipping {num_tools} tool call(s)")
+            print(f"{self.log_prefix}⚡ 中断: 跳过 {num_tools} 个工具调用")
             for tc in tool_calls:
                 messages.append({
                     "role": "tool",
@@ -7950,8 +7964,8 @@ class AIAgent:
                         if not _interrupt_logged:
                             _interrupt_logged = True
                             self._vprint(
-                                f"{self.log_prefix}⚡ Interrupt: cancelling "
-                                f"{len(not_done)} pending concurrent tool(s)",
+                                f"{self.log_prefix}⚡ 中断: 取消 "
+                                f"{len(not_done)} 个未完成的并发工具",
                                 force=True,
                             )
                         for f in not_done:
@@ -8076,7 +8090,7 @@ class AIAgent:
             if self._interrupt_requested:
                 remaining_calls = assistant_message.tool_calls[i-1:]
                 if remaining_calls:
-                    self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {len(remaining_calls)} tool call(s)", force=True)
+                    self._vprint(f"{self.log_prefix}⚡ 中断: 跳过 {len(remaining_calls)} 个工具调用", force=True)
                 for skipped_tc in remaining_calls:
                     skipped_name = skipped_tc.function.name
                     skip_msg = {
@@ -8425,7 +8439,7 @@ class AIAgent:
 
             if self._interrupt_requested and i < len(assistant_message.tool_calls):
                 remaining = len(assistant_message.tool_calls) - i
-                self._vprint(f"{self.log_prefix}⚡ Interrupt: skipping {remaining} remaining tool call(s)", force=True)
+                self._vprint(f"{self.log_prefix}⚡ 中断: 跳过 {remaining} 个剩余工具调用", force=True)
                 for skipped_tc in assistant_message.tool_calls[i:]:
                     skipped_name = skipped_tc.function.name
                     skip_msg = {
@@ -8708,9 +8722,8 @@ class AIAgent:
             try:
                 if self._cleanup_dead_connections():
                     self._emit_status(
-                        "🔌 Detected stale connections from a previous provider "
-                        "issue — cleaned up automatically. Proceeding with fresh "
-                        "connection."
+                        "🔌 检测到上次供应商问题残留的陈旧连接 "
+                        "— 已自动清理。使用新连接继续。"
                     )
             except Exception:
                 pass
@@ -9489,7 +9502,7 @@ class AIAgent:
                         # rate-limit symptom.  Switch to fallback immediately
                         # rather than retrying with extended backoff.
                         if self._fallback_index < len(self._fallback_chain):
-                            self._emit_status("⚠️ Empty/malformed response — switching to fallback...")
+                            self._emit_status("⚠️ 响应为空或格式错误 — 正在切换到备用方案...")
                         if self._try_activate_fallback():
                             retry_count = 0
                             compression_attempts = 0
@@ -9586,7 +9599,7 @@ class AIAgent:
                         _backoff_touch_counter = 0
                         while time.time() < sleep_end:
                             if self._interrupt_requested:
-                                self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                                self._vprint(f"{self.log_prefix}⚡ 重试等待期间检测到中断，已中止。", force=True)
                                 self._persist_session(messages, conversation_history)
                                 self.clear_interrupt()
                                 return {
@@ -9961,7 +9974,7 @@ class AIAgent:
                     if self.thinking_callback:
                         self.thinking_callback("")
                     api_elapsed = time.time() - api_start_time
-                    self._vprint(f"{self.log_prefix}⚡ Interrupted during API call.", force=True)
+                    self._vprint(f"{self.log_prefix}⚡ API 调用期间被中断。", force=True)
                     self._persist_session(messages, conversation_history)
                     interrupted = True
                     final_response = f"Operation interrupted: waiting for model response ({api_elapsed:.1f}s elapsed)."
@@ -10324,7 +10337,7 @@ class AIAgent:
 
                     # Check for interrupt before deciding to retry
                     if self._interrupt_requested:
-                        self._vprint(f"{self.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
+                        self._vprint(f"{self.log_prefix}⚡ 错误处理期间检测到中断，已中止重试。", force=True)
                         self._persist_session(messages, conversation_history)
                         self.clear_interrupt()
                         return {
@@ -10389,8 +10402,8 @@ class AIAgent:
                             conversation_history = None
                             if len(messages) < original_len or old_ctx > _reduced_ctx:
                                 self._emit_status(
-                                    f"🗜️ Context reduced to {_reduced_ctx:,} tokens "
-                                    f"(was {old_ctx:,}), retrying..."
+                                    f"🗜️ 上下文已缩减至 {_reduced_ctx:,} tokens "
+                                    f"(原 {old_ctx:,}), 正在重试..."
                                 )
                                 time.sleep(2)
                                 restart_with_compressed_messages = True
@@ -10473,7 +10486,7 @@ class AIAgent:
                                 "failed": True,
                                 "compression_exhausted": True,
                             }
-                        self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
+                        self._emit_status(f"⚠️ 请求负载过大 (413) — 压缩尝试 {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
@@ -10486,7 +10499,7 @@ class AIAgent:
                         conversation_history = None
 
                         if len(messages) < original_len:
-                            self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            self._emit_status(f"🗜️ 已压缩 {original_len} → {len(messages)} 条消息，正在重试...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
@@ -10609,7 +10622,7 @@ class AIAgent:
                                 "failed": True,
                                 "compression_exhausted": True,
                             }
-                        self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                        self._emit_status(f"🗜️ 上下文过大 (~{approx_tokens:,} tokens) — 正在压缩 ({compression_attempts}/{max_compression_attempts})...")
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
@@ -10623,7 +10636,7 @@ class AIAgent:
 
                         if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
                             if len(messages) < original_len:
-                                self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                                self._emit_status(f"🗜️ 已压缩 {original_len} → {len(messages)} 条消息，正在重试...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
@@ -10833,7 +10846,7 @@ class AIAgent:
                     _backoff_touch_counter = 0
                     while time.time() < sleep_end:
                         if self._interrupt_requested:
-                            self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            self._vprint(f"{self.log_prefix}⚡ 重试等待期间检测到中断，已中止。", force=True)
                             self._persist_session(messages, conversation_history)
                             self.clear_interrupt()
                             return {
@@ -11377,8 +11390,8 @@ class AIAgent:
                                 len(_recovered),
                             )
                             self._emit_status(
-                                "↻ Stream interrupted — using delivered content "
-                                "as final response"
+                                "↻ 流被中断 — 使用已接收内容 "
+                                "作为最终响应"
                             )
                             final_response = _recovered
                             self._response_was_previewed = True
@@ -11398,7 +11411,7 @@ class AIAgent:
                         if fallback and getattr(self, '_last_content_tools_all_housekeeping', False):
                             _turn_exit_reason = "fallback_prior_turn_content"
                             logger.info("Empty follow-up after tool calls — using prior turn content as final response")
-                            self._emit_status("↻ Empty response after tool calls — using earlier content as final answer")
+                            self._emit_status("↻ 工具调用后收到空响应 — 使用之前的内容作为最终回答")
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
                             self._empty_content_retries = 0
@@ -11441,8 +11454,8 @@ class AIAgent:
                                 "to continue processing"
                             )
                             self._emit_status(
-                                "⚠️ Model returned empty after tool calls — "
-                                "nudging to continue"
+                                "⚠️ 模型在工具调用后返回空内容 — "
+                                "正在提示继续"
                             )
                             # Append the empty assistant message first so the
                             # message sequence stays valid:
@@ -11482,7 +11495,7 @@ class AIAgent:
                                 self._thinking_prefill_retries,
                             )
                             self._emit_status(
-                                f"↻ Thinking-only response — prefilling to continue "
+                                f"↻ 仅思考响应 — 正在预填充以继续 "
                                 f"({self._thinking_prefill_retries}/2)"
                             )
                             interim_msg = self._build_assistant_message(
@@ -11518,7 +11531,7 @@ class AIAgent:
                                 self._empty_content_retries, self.model,
                             )
                             self._emit_status(
-                                f"⚠️ Empty response from model — retrying "
+                                f"⚠️ 模型返回空响应 — 正在重试 "
                                 f"({self._empty_content_retries}/3)"
                             )
                             continue
@@ -11537,13 +11550,13 @@ class AIAgent:
                                 self.provider,
                             )
                             self._emit_status(
-                                "⚠️ Model returning empty responses — "
-                                "switching to fallback provider..."
+                                "⚠️ 模型持续返回空响应 — "
+                                "正在切换到备用供应商..."
                             )
                             if self._try_activate_fallback():
                                 self._empty_content_retries = 0
                                 self._emit_status(
-                                    f"↻ Switched to fallback: {self.model} "
+                                    f"↻ 已切换到备用方案: {self.model} "
                                     f"({self.provider})"
                                 )
                                 logger.info(
@@ -11570,8 +11583,8 @@ class AIAgent:
                                 "Reasoning: %s", reasoning_preview,
                             )
                             self._emit_status(
-                                "⚠️ Model produced reasoning but no visible "
-                                "response after all retries. Returning empty."
+                                "⚠️ 模型产生了推理但没有可见响应 "
+                                "（已耗尽所有重试）。返回空结果。"
                             )
                         else:
                             logger.warning(
@@ -11582,9 +11595,9 @@ class AIAgent:
                                 self.provider,
                             )
                             self._emit_status(
-                                "❌ Model returned no content after all retries"
-                                + (" and fallback attempts." if self._fallback_chain else
-                                   ". No fallback providers configured.")
+                                "❌ 模型在所有重试后仍未返回内容"
+                                + ("，备用方案也已尝试。" if self._fallback_chain else
+                                   "。未配置备用供应商。")
                             )
 
                         final_response = "(empty)"
