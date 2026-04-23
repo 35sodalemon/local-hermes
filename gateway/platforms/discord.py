@@ -527,6 +527,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        self._slash_commands: bool = self.config.extra.get("slash_commands", True)
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -649,7 +650,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 if adapter_self._dedup.is_duplicate(str(message.id)):
                     return
 
-                # 总是允许 ignore our own messages
+                # Always ignore our own messages
                 if message.author == self._client.user:
                     return
 
@@ -744,61 +745,11 @@ class DiscordAdapter(BasePlatformAdapter):
                     )
 
             # Register slash commands
-            self._register_slash_commands()
+            if self._slash_commands:
+                self._register_slash_commands()
 
             # Start the bot in background
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
-
-            # Attach a done callback to detect proxy/network failures gracefully.
-            # Without this, an unhandled exception in the bot task crashes the
-            # entire gateway process.  By marking the error as retryable we let
-            # the gateway's background reconnection loop (_failed_platforms)
-            # take over and reconnect automatically when the network recovers.
-            adapter_self_ref = self
-
-            def _on_bot_task_done(task: asyncio.Task) -> None:
-                if task.cancelled():
-                    logger.info("[%s] Bot task was cancelled (normal shutdown)", adapter_self_ref.name)
-                    return
-                exc = task.exception()
-                if exc is None:
-                    return
-                # Classify the error
-                exc_name = type(exc).__name__
-                exc_msg = str(exc)
-                logger.warning(
-                    "[%s] Discord bot task crashed: %s: %s",
-                    adapter_self_ref.name, exc_name, exc_msg,
-                )
-                # Treat proxy / network errors as retryable so the gateway's
-                # background reconnection loop can reconnect automatically.
-                is_network = any(keyword in exc_msg.lower() for keyword in (
-                    "proxy", "connect", "timeout", "connection", "refused",
-                    "reset", "network", "dns", "resolve", "unreachable",
-                    "cannot connect",
-                ))
-                if is_network:
-                    adapter_self_ref._set_fatal_error(
-                        code="network_error",
-                        message=f"Discord connection lost (network/proxy): {exc_name}: {exc_msg}",
-                        retryable=True,
-                    )
-                else:
-                    adapter_self_ref._set_fatal_error(
-                        code="bot_task_error",
-                        message=f"Discord bot task error: {exc_name}: {exc_msg}",
-                        retryable=True,  # default retryable — most transient errors are
-                    )
-                # Notify the gateway so it can queue reconnection
-                if adapter_self_ref._fatal_error_handler:
-                    try:
-                        handler = adapter_self_ref._fatal_error_handler
-                        asyncio.get_running_loop().create_task(handler(adapter_self_ref))
-                    except RuntimeError:
-                        # Event loop may already be shutting down
-                        pass
-
-            self._bot_task.add_done_callback(_on_bot_task_done)
 
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
@@ -839,7 +790,6 @@ class DiscordAdapter(BasePlatformAdapter):
 
         self._running = False
         self._client = None
-        self._bot_task = None  # Release done callback closure
         self._ready_event.clear()
         self._post_connect_task = None
 
@@ -853,21 +803,13 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         try:
             synced = await asyncio.wait_for(self._client.tree.sync(), timeout=30)
-            print(f"[Discord] Synced {len(synced)} slash command(s): {[c.name for c in synced]}", flush=True)
-            # List all registered commands on the tree
-            all_cmds = self._client.tree.get_commands()
-            for cmd in all_cmds:
-                if hasattr(cmd, '_children'):
-                    children = list(cmd._children.values())
-                    print(f"  /{cmd.name} -> {len(children)} sub-items: {[c.name for c in children]}", flush=True)
-                else:
-                    print(f"  /{cmd.name}", flush=True)
+            logger.info("[%s] Synced %d slash command(s)", self.name, len(synced))
         except asyncio.TimeoutError:
-            print(f"[Discord] Slash command sync timed out after 30s", flush=True)
+            logger.warning("[%s] Slash command sync timed out after 30s", self.name)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # pragma: no cover - defensive logging
-            print(f"[Discord] Slash command sync failed: {e}", flush=True)
+            logger.warning("[%s] Slash command sync failed: %s", self.name, e, exc_info=True)
 
     async def _add_reaction(self, message: Any, emoji: str) -> bool:
         """Add an emoji reaction to a Discord message."""
@@ -1683,7 +1625,7 @@ class DiscordAdapter(BasePlatformAdapter):
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-            async with aiohttp.Client本次会话(**_sess_kw) as session:
+            async with aiohttp.ClientSession(**_sess_kw) as session:
                 async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
                     if resp.status != 200:
                         raise Exception(f"Failed to download image: HTTP {resp.status}")
@@ -1762,7 +1704,7 @@ class DiscordAdapter(BasePlatformAdapter):
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
             _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-            async with aiohttp.Client本次会话(**_sess_kw) as session:
+            async with aiohttp.ClientSession(**_sess_kw) as session:
                 async with session.get(animation_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
                     if resp.status != 200:
                         raise Exception(f"Failed to download animation: HTTP {resp.status}")
@@ -2004,8 +1946,6 @@ class DiscordAdapter(BasePlatformAdapter):
         then cleans up the deferred response.  If *followup_msg* is provided
         the "thinking..." indicator is replaced with that text; otherwise it
         is deleted so the channel isn't cluttered.
-        
-        Also tracks skill usage for the skill display system.
         """
         # Log the invoker so ghost-command reports can be triaged.  Discord
         # native slash invocations are always user-initiated (no bot can fire
@@ -2024,12 +1964,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
         except Exception:
             pass  # logging must never block command dispatch
-        
-        # Track skill usage if this is a skill command
-        if command_text.startswith("/skill "):
-            skill_key = command_text.split(" ")[1] if len(command_text.split(" ")) > 1 else None
-            if skill_key:
-                self._track_skill_usage(skill_key)
+
         await interaction.response.defer(ephemeral=True)
         event = self._build_slash_event(interaction, command_text)
         await self.handle_message(event)
@@ -2040,33 +1975,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 await interaction.delete_original_response()
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
-    
-    def _track_skill_usage(self, skill_key: str) -> None:
-        """Track skill usage by incrementing the counter in skill_usage.json."""
-        import json
-        from pathlib import Path
-        
-        usage_path = Path.home() / ".hermes" / "skill_usage.json"
-        
-        try:
-            # Load current usage data
-            usage_data = {}
-            if usage_path.exists():
-                with open(usage_path, 'r', encoding='utf-8') as f:
-                    usage_data = json.load(f)
-            
-            # Increment counter
-            current_count = usage_data.get(skill_key, 0)
-            usage_data[skill_key] = current_count + 1
-            
-            # Save updated data
-            with open(usage_path, 'w', encoding='utf-8') as f:
-                json.dump(usage_data, f, indent=2, ensure_ascii=False)
-            
-            logger.debug("Tracked usage for skill: %s (count: %d)", skill_key, current_count + 1)
-            
-        except Exception as e:
-            logger.warning("Failed to track skill usage for %s: %s", skill_key, e)
 
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
@@ -2081,7 +1989,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         @tree.command(name="reset", description="Reset your Hermes session")
         async def slash_reset(interaction: discord.Interaction):
-            await self._run_simple_slash(interaction, "/reset", "本次会话 reset~")
+            await self._run_simple_slash(interaction, "/reset", "Session reset~")
 
         @tree.command(name="model", description="Show or change the model")
         @discord.app_commands.describe(name="Model name (e.g. anthropic/claude-sonnet-4). Leave empty to see current.")
@@ -2128,12 +2036,12 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._run_simple_slash(interaction, "/compress")
 
         @tree.command(name="title", description="Set or show the session title")
-        @discord.app_commands.describe(name="本次会话 title. Leave empty to show current.")
+        @discord.app_commands.describe(name="Session title. Leave empty to show current.")
         async def slash_title(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/title {name}".strip())
 
         @tree.command(name="resume", description="Resume a previously-named session")
-        @discord.app_commands.describe(name="本次会话 name to resume. Leave empty to list sessions.")
+        @discord.app_commands.describe(name="Session name to resume. Leave empty to list sessions.")
         async def slash_resume(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/resume {name}".strip())
 
@@ -2184,7 +2092,7 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_approve(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/approve {scope}".strip())
 
-        @tree.command(name="deny", description="拒绝 a pending dangerous command")
+        @tree.command(name="deny", description="Deny a pending dangerous command")
         @discord.app_commands.describe(scope="Optional: 'all' to deny all pending commands")
         async def slash_deny(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/deny {scope}".strip())
@@ -2223,10 +2131,42 @@ class DiscordAdapter(BasePlatformAdapter):
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
         # commands without needing a manual entry here.
+        def _build_auto_slash_command(_name: str, _description: str, _args_hint: str = ""):
+            """Build a discord.app_commands.Command that proxies to _run_simple_slash."""
+            discord_name = _name.lower()[:32]
+            desc = (_description or f"Run /{_name}")[:100]
+            has_args = bool(_args_hint)
+
+            if has_args:
+                def _make_args_handler(__name: str, __hint: str):
+                    @discord.app_commands.describe(args=f"Arguments: {__hint}"[:100])
+                    async def _handler(interaction: discord.Interaction, args: str = ""):
+                        await self._run_simple_slash(
+                            interaction, f"/{__name} {args}".strip()
+                        )
+                    _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
+                    return _handler
+
+                handler = _make_args_handler(_name, _args_hint)
+            else:
+                def _make_simple_handler(__name: str):
+                    async def _handler(interaction: discord.Interaction):
+                        await self._run_simple_slash(interaction, f"/{__name}")
+                    _handler.__name__ = f"auto_slash_{__name.replace('-', '_')}"
+                    return _handler
+
+                handler = _make_simple_handler(_name)
+
+            return discord.app_commands.Command(
+                name=discord_name,
+                description=desc,
+                callback=handler,
+            )
+
+        already_registered: set[str] = set()
         try:
             from hermes_cli.commands import COMMAND_REGISTRY, _is_gateway_available, _resolve_config_gates
 
-            already_registered = set()
             try:
                 already_registered = {cmd.name for cmd in tree.get_commands()}
             except Exception:
@@ -2241,40 +2181,10 @@ class DiscordAdapter(BasePlatformAdapter):
                 discord_name = cmd_def.name.lower()[:32]
                 if discord_name in already_registered:
                     continue
-                # Skip aliases that overlap with already-registered names
-                # (aliases for explicitly registered commands are handled above).
-                desc = (cmd_def.description or f"Run /{cmd_def.name}")[:100]
-                # CommandDef uses Chinese field name 参数提示
-                _hint = getattr(cmd_def, '参数提示', '') or getattr(cmd_def, 'args_hint', '')
-                has_args = bool(_hint)
-
-                if has_args:
-                    # Command takes optional arguments — create handler with
-                    # an optional ``args`` string parameter.
-                    def _make_args_handler(_name: str, _hint: str):
-                        @discord.app_commands.describe(args=f"Arguments: {_hint}"[:100])
-                        async def _handler(interaction: discord.Interaction, args: str = ""):
-                            await self._run_simple_slash(
-                                interaction, f"/{_name} {args}".strip()
-                            )
-                        _handler.__name__ = f"auto_slash_{_name.replace('-', '_')}"
-                        return _handler
-
-                    handler = _make_args_handler(cmd_def.name, _hint)
-                else:
-                    # Parameterless command.
-                    def _make_simple_handler(_name: str):
-                        async def _handler(interaction: discord.Interaction):
-                            await self._run_simple_slash(interaction, f"/{_name}")
-                        _handler.__name__ = f"auto_slash_{_name.replace('-', '_')}"
-                        return _handler
-
-                    handler = _make_simple_handler(cmd_def.name)
-
-                auto_cmd = discord.app_commands.Command(
-                    name=discord_name,
-                    description=desc,
-                    callback=handler,
+                auto_cmd = _build_auto_slash_command(
+                    cmd_def.name,
+                    cmd_def.description,
+                    cmd_def.args_hint,
                 )
                 try:
                     tree.add_command(auto_cmd)
@@ -2291,26 +2201,42 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("Discord auto-register from COMMAND_REGISTRY failed: %s", e)
 
+        # ── Plugin-registered slash commands ──
+        # Plugins register via PluginContext.register_command(); we mirror
+        # those into Discord's native slash picker so users get the same
+        # autocomplete UX as for built-in commands. No per-platform plugin
+        # API needed — plugin commands are platform-agnostic.
+        try:
+            from hermes_cli.commands import _iter_plugin_command_entries
+
+            for plugin_name, plugin_desc, plugin_args_hint in _iter_plugin_command_entries():
+                discord_name = plugin_name.lower()[:32]
+                if discord_name in already_registered:
+                    continue
+                auto_cmd = _build_auto_slash_command(
+                    plugin_name,
+                    plugin_desc,
+                    plugin_args_hint,
+                )
+                try:
+                    tree.add_command(auto_cmd)
+                    already_registered.add(discord_name)
+                except Exception:
+                    # Silently skip commands that fail registration (e.g.
+                    # name conflict with a subcommand group).
+                    pass
+        except Exception as e:
+            logger.warning(
+                "Discord auto-register from plugin commands failed: %s", e
+            )
+
         # Register skills under a single /skill command group with category
         # subcommand groups.  This uses 1 top-level slot instead of N,
         # supporting up to 25 categories × 25 skills = 625 skills.
-        logger.info("[Discord] 开始注册技能组")
         self._register_skill_group(tree)
-        logger.info("[Discord] 技能组注册完成")
-
-    @staticmethod
-    def _estimate_command_bytes(name: str, description: str) -> int:
-        """Rough byte estimate for a single command's Discord payload.
-
-        Based on the JSON Discord receives: name + description + fixed overhead
-        for type, id, options structure etc.
-        """
-        # Empirical: each command ≈ name bytes + description bytes + ~50 bytes overhead
-        return len(name.encode("utf-8")) + len(description.encode("utf-8")) + 80
 
     def _register_skill_group(self, tree) -> None:
         """Register a single ``/skill`` command with autocomplete on the name.
-
 
         Discord enforces an ~8000-byte per-command payload limit. The older
         nested layout (``/skill <category> <name>``) registered one giant
@@ -2328,14 +2254,6 @@ class DiscordAdapter(BasePlatformAdapter):
         Discord live-filters by the user's typed prefix against both the
         skill name and its description.
         """
-
-        import json as _json
-        import os
-        from pathlib import Path
-
-        # Discord's per-command-group size limit (bytes in the JSON payload)
-        _SIZE_BUDGET = 7500  # leave 500 B margin from the 8000 limit
-
         try:
             from hermes_cli.commands import discord_skill_commands_by_category
 
@@ -2344,7 +2262,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 existing_names = {cmd.name for cmd in tree.get_commands()}
             except Exception:
                 pass
-
 
             # Reuse the existing collector for consistent filtering
             # (per-platform disabled, hub-excluded, name clamping), then
@@ -2435,7 +2352,6 @@ class DiscordAdapter(BasePlatformAdapter):
                     "[%s] %d skill(s) filtered out of /skill (name clamp / reserved)",
                     self.name, hidden,
                 )
-
         except Exception as exc:
             logger.warning("[%s] Failed to register /skill command: %s", self.name, exc)
 
@@ -3262,20 +3178,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         )
                     else:
                         try:
-                            import aiohttp
-                            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-                            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
-                            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-                            async with aiohttp.Client本次会话(**_sess_kw) as session:
-                                async with session.get(
-                                    att.url,
-                                    timeout=aiohttp.ClientTimeout(total=30),
-                                    **_req_kw,
-                                ) as resp:
-                                    if resp.status != 200:
-                                        raise Exception(f"HTTP {resp.status}")
-                                    raw_bytes = await resp.read()
-
+                            raw_bytes = await self._cache_discord_document(att, ext)
                             cached_path = cache_document_from_bytes(
                                 raw_bytes, att.filename or f"document{ext}"
                             )
@@ -3359,7 +3262,7 @@ class DiscordAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        """本次会话-scoped key for text message batching."""
+        """Session-scoped key for text message batching."""
         from gateway.session import build_session_key
         return build_session_key(
             event.source,
@@ -3446,7 +3349,7 @@ if DISCORD_AVAILABLE:
         """
         Interactive button view for exec approval of dangerous commands.
 
-        Shows four buttons: 允许一次, Allow 本次会话, 总是允许 Allow, 拒绝.
+        Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
         Clicking a button calls ``resolve_gateway_approval()`` to unblock the
         waiting agent thread — the same mechanism as the text ``/approve`` flow.
         Only users in the allowed list can click.  Times out after 5 minutes.
@@ -3506,25 +3409,25 @@ if DISCORD_AVAILABLE:
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from button: %s", exc)
 
-        @discord.ui.button(label="允许一次", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
         async def allow_once(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
 
-        @discord.ui.button(label="Allow 本次会话", style=discord.ButtonStyle.grey)
+        @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
         async def allow_session(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
 
-        @discord.ui.button(label="总是允许 Allow", style=discord.ButtonStyle.blurple)
+        @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
         async def allow_always(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
 
-        @discord.ui.button(label="拒绝", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
         async def deny(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
