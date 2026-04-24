@@ -77,7 +77,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("rollback", "查看/恢复文件检查点", "会话",
                参数提示="[序号]"),
     CommandDef("snapshot", "创建或恢复配置快照", "会话",
-               aliases=("snap",), 参数提示="[create|restore <id>|prune]"),
+               cli_only=True, aliases=("snap",), 参数提示="[create|restore <id>|prune]"),
     CommandDef("stop", "终止所有后台进程", "会话"),
     CommandDef("approve", "批准待审危险命令", "会话",
                仅网关=True, 参数提示="[session|always]"),
@@ -87,7 +87,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("bg",), 参数提示="<提示>"),
     CommandDef("btw", "临时旁问（无工具，不存历史）", "会话",
                参数提示="<问题>"),
-    CommandDef("agents", "显示活跃代理和运行中的任务", "会话",
+    CommandDef("agents", "显示活跃代理和运行中的任务", "会话"
                aliases=("tasks",)),
     CommandDef("queue", "排队提示，不打断当前对话", "会话",
                aliases=("q",), 参数提示="<提示>"),
@@ -103,9 +103,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # 配置
     CommandDef("config", "显示当前配置", "配置",
                cli_only=True),
-    CommandDef("model", "切换模型", "配置", 参数提示="[模型] [--global]"),
-    CommandDef("provider", "查看可用供应商", "配置"),
-    CommandDef("gquota", "查看 Google Gemini Code Assist 配额使用情况", "信息"),
+    CommandDef("model", "切换模型", "配置", 参数提示="[模型] [--provider name] [--global]"),
+    CommandDef("gquota", "查看 Google Gemini Code Assist 配额使用情况", "信息",
+               cli_only=True),
 
     CommandDef("personality", "设置人格模式", "配置",
                参数提示="[名称]"),
@@ -137,7 +137,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("cron", "管理定时任务", "工具与技能",
                cli_only=True, 参数提示="[子命令]",
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
-    CommandDef("reload", "重载.env环境变量", "工具与技能"),
+    CommandDef("reload", "重载.env环境变量", "工具与技能",
+               cli_only=True),
     CommandDef("reload-mcp", "重载MCP服务器", "工具与技能",
                aliases=("reload_mcp",)),
     CommandDef("browser", "连接Chrome浏览器", "工具与技能",
@@ -313,7 +314,7 @@ def should_bypass_active_session(command_name: str | None) -> bool:
     safety net in gateway.run discards any command text that reaches
     the pending queue — which meant a mid-run /model (or /reasoning,
     /voice, /insights, /title, /resume, /retry, /undo, /compress,
-    /usage, /provider, /reload-mcp, /sethome, /reset) would silently
+    /usage, /reload-mcp, /sethome, /reset) would silently
     interrupt the agent AND get discarded, producing a zero-char
     response. See issue #5057 / PRs #6252, #10370, #4665.
 
@@ -448,146 +449,11 @@ _CMD_NAME_LIMIT = 32
 """Max command name length shared by Telegram and Discord."""
 
 # Backward-compat alias — tests and external code may reference the old name.
-_TG_NAME_LIMIT = _CMD_NAME_LIMIT
+_TG_NAME_LIMIT = _CMD_NAME_LI
 
-# Telegram Bot API allows only lowercase a-z, 0-9, and underscores in
-# command names.  This regex strips everything else after initial conversion.
-_TG_INVALID_CHARS = re.compile(r"[^a-z0-9_]")
-_TG_MULTI_UNDERSCORE = re.compile(r"_{2,}")
+... [OUTPUT TRUNCATED - 5562 chars omitted out of 55562 total] ...
 
-
-def _sanitize_telegram_name(raw: str) -> str:
-    """Convert a command/skill/plugin name to a valid Telegram command name.
-
-    Telegram requires: 1-32 chars, lowercase a-z, digits 0-9, underscores only.
-    Steps: lowercase → replace hyphens with underscores → strip all other
-    invalid characters → collapse consecutive underscores → strip leading/
-    trailing underscores.
-    """
-    name = raw.lower().replace("-", "_")
-    name = _TG_INVALID_CHARS.sub("", name)
-    name = _TG_MULTI_UNDERSCORE.sub("_", name)
-    return name.strip("_")
-
-
-def _clamp_command_names(
-    entries: list[tuple[str, str]],
-    reserved: set[str],
-) -> list[tuple[str, str]]:
-    """Enforce 32-char command name limit with collision avoidance.
-
-    Both Telegram and Discord cap slash command names at 32 characters.
-    Names exceeding the limit are truncated.  If truncation creates a duplicate
-    (against *reserved* names or earlier entries in the same batch), the name is
-    shortened to 31 chars and a digit ``0``-``9`` is appended to differentiate.
-    If all 10 digit slots are taken the entry is silently dropped.
-    """
-    used: set[str] = set(reserved)
-    result: list[tuple[str, str]] = []
-    for name, desc in entries:
-        if len(name) > _CMD_NAME_LIMIT:
-            candidate = name[:_CMD_NAME_LIMIT]
-            if candidate in used:
-                prefix = name[:_CMD_NAME_LIMIT - 1]
-                for digit in range(10):
-                    candidate = f"{prefix}{digit}"
-                    if candidate not in used:
-                        break
-                else:
-                    # All 10 digit slots exhausted — skip entry
-                    continue
-            name = candidate
-        if name in used:
-            continue
-        used.add(name)
-        result.append((name, desc))
-    return result
-
-
-# Backward-compat alias.
-_clamp_telegram_names = _clamp_command_names
-
-
-# ---------------------------------------------------------------------------
-# Shared skill/plugin collection for gateway platforms
-# ---------------------------------------------------------------------------
-
-def _collect_gateway_skill_entries(
-    platform: str,
-    max_slots: int,
-    reserved_names: set[str],
-    desc_limit: int = 100,
-    sanitize_name: "Callable[[str], str] | None" = None,
-) -> tuple[list[tuple[str, str, str]], int]:
-    """Collect plugin + skill entries for a gateway platform.
-
-    Priority order:
-      1. Plugin slash commands (take precedence over skills)
-      2. Built-in skill commands (fill remaining slots, alphabetical)
-
-    Only skills are trimmed when the cap is reached.
-    Hub-installed skills are excluded.  Per-platform disabled skills are
-    excluded.
-
-    Args:
-        platform: Platform identifier for per-platform skill filtering
-            (``"telegram"``, ``"discord"``, etc.).
-        max_slots: Maximum number of entries to return (remaining slots after
-            built-in/core commands).
-        reserved_names: Names already taken by built-in commands.  Mutated
-            in-place as new names are added.
-        desc_limit: Max description length (40 for Telegram, 100 for Discord).
-        sanitize_name: Optional name transform applied before clamping, e.g.
-            :func:`_sanitize_telegram_name` for Telegram.  May return an
-            empty string to signal "skip this entry".
-
-    Returns:
-        ``(entries, hidden_count)`` where *entries* is a list of
-        ``(name, description, cmd_key)`` triples and *hidden_count* is the
-        number of skill entries dropped due to the cap.  ``cmd_key`` is the
-        original ``/skill-name`` key from :func:`get_skill_commands`.
-    """
-    all_entries: list[tuple[str, str, str]] = []
-
-    # --- Tier 1: Plugin slash commands (never trimmed) ---------------------
-    plugin_pairs: list[tuple[str, str]] = []
-    try:
-        from hermes_cli.plugins import get_plugin_commands
-        plugin_cmds = get_plugin_commands()
-        for cmd_name in sorted(plugin_cmds):
-            name = sanitize_name(cmd_name) if sanitize_name else cmd_name
-            if not name:
-                continue
-            desc = plugin_cmds[cmd_name].get("description", "Plugin command")
-            if len(desc) > desc_limit:
-                desc = desc[:desc_limit - 3] + "..."
-            plugin_pairs.append((name, desc))
-    except Exception:
-        pass
-
-    plugin_pairs = _clamp_command_names(plugin_pairs, reserved_names)
-    reserved_names.update(n for n, _ in plugin_pairs)
-    # Plugins have no cmd_key — use empty string as placeholder
-    for n, d in plugin_pairs:
-        all_entries.append((n, d, ""))
-
-    # --- Tier 2: Built-in skill commands (trimmed at cap) -----------------
-    _platform_disabled: set[str] = set()
-    try:
-        from agent.skill_utils import get_disabled_skill_names
-        _platform_disabled = get_disabled_skill_names(platform=platform)
-    except Exception:
-        pass
-
-    skill_triples: list[tuple[str, str, str]] = []
-    try:
-        from agent.skill_commands import get_skill_commands
-        from tools.skills_tool import SKILLS_DIR
-        _skills_dir = str(SKILLS_DIR.resolve())
-        _hub_dir = str((SKILLS_DIR / ".hub").resolve())
-        skill_cmds = get_skill_commands()
-        for cmd_key in sorted(skill_cmds):
-            info = skill_cmds[cmd_key]
+d_key]
             skill_path = info.get("skill_md_path", "")
             if not skill_path.startswith(_skills_dir):
                 continue

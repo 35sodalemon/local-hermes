@@ -74,6 +74,12 @@ _PROVIDER_ALIASES = {
     "minimax_cn": "minimax-cn",
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "github": "copilot",
+    "github-copilot": "copilot",
+    "github-model": "copilot",
+    "github-models": "copilot",
+    "github-copilot-acp": "copilot-acp",
+    "copilot-acp-agent": "copilot-acp",
 }
 
 
@@ -89,10 +95,11 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
     if normalized == "main":
         # Resolve to the user's actual main provider so named custom providers
         # and non-aggregator providers (DeepSeek, Alibaba, etc.) work correctly.
-        main_prov = _read_main_provider()
+        main_prov = (_read_main_provider() or "").strip().lower()
         if main_prov and main_prov not in ("auto", "main", ""):
-            return main_prov
-        return "custom"
+            normalized = main_prov
+        else:
+            return "custom"
     return _PROVIDER_ALIASES.get(normalized, normalized)
 
 
@@ -151,7 +158,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 # differs from their main chat model, map it here.  The vision auto-detect
 # "exotic provider" branch checks this before falling back to the main model.
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
-    "xiaomi": "mimo-v2-omni",
+    "xiaomi": "mimo-v2.5",
     "zai": "glm-5v-turbo",
 }
 
@@ -916,6 +923,19 @@ def _try_openrouter() -> Tuple[Optional[OpenAI], Optional[str]]:
                    default_headers=_OR_HEADERS), _OPENROUTER_MODEL
 
 
+def _describe_openrouter_unavailable() -> str:
+    """Return a more precise OpenRouter auth failure reason for logs."""
+    pool_present, entry = _select_pool_entry("openrouter")
+    if pool_present:
+        if entry is None:
+            return "OpenRouter credential pool has no usable entries (credentials may be exhausted)"
+        if not _pool_runtime_api_key(entry):
+            return "OpenRouter credential pool entry is missing a runtime API key"
+    if not str(os.getenv("OPENROUTER_API_KEY") or "").strip():
+        return "OPENROUTER_API_KEY not set"
+    return "no usable OpenRouter credentials found"
+
+
 def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
     # Check cross-session rate limit guard before attempting Nous —
     # if another session already recorded a 429, skip Nous entirely
@@ -1627,8 +1647,10 @@ def resolve_provider_client(
     if provider == "openrouter":
         client, default = _try_openrouter()
         if client is None:
-            logger.warning("resolve_provider_client: openrouter requested "
-                           "but OPENROUTER_API_KEY not set")
+            logger.warning(
+                "resolve_provider_client: openrouter requested but %s",
+                _describe_openrouter_unavailable(),
+            )
             return None, None
         final_model = _normalize_resolved_model(model or default, provider)
         return (_to_async_client(client, final_model) if async_mode
@@ -1721,7 +1743,7 @@ def resolve_provider_client(
                        "but no endpoint credentials found")
         return None, None
 
-    # ── Named custom providers (config.yaml custom_providers list) ───
+    # ── Named custom providers (config.yaml providers dict / custom_providers list) ───
     try:
         from hermes_cli.runtime_provider import _get_named_custom_provider
         custom_entry = _get_named_custom_provider(provider)
@@ -1732,16 +1754,51 @@ def resolve_provider_client(
             if not custom_key and custom_key_env:
                 custom_key = os.getenv(custom_key_env, "").strip()
             custom_key = custom_key or "no-key-required"
+            # An explicit per-task api_mode override (from _resolve_task_provider_model)
+            # wins; otherwise fall back to what the provider entry declared.
+            entry_api_mode = (api_mode or custom_entry.get("api_mode") or "").strip()
             if custom_base:
                 final_model = _normalize_resolved_model(
                     model or custom_entry.get("model") or _read_main_model() or "gpt-4o-mini",
                     provider,
                 )
-                client = OpenAI(api_key=custom_key, base_url=custom_base)
-                client = _wrap_if_needed(client, final_model, custom_base)
                 logger.debug(
-                    "resolve_provider_client: named custom provider %r (%s)",
-                    provider, final_model)
+                    "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
+                    provider, final_model, entry_api_mode or "chat_completions")
+                # anthropic_messages: route through the Anthropic Messages API
+                # via AnthropicAuxiliaryClient. Mirrors the anonymous-custom
+                # branch in _try_custom_endpoint(). See #15033.
+                if entry_api_mode == "anthropic_messages":
+                    try:
+                        from agent.anthropic_adapter import build_anthropic_client
+                        real_client = build_anthropic_client(custom_key, custom_base)
+                    except ImportError:
+                        logger.warning(
+                            "Named custom provider %r declares api_mode="
+                            "anthropic_messages but the anthropic SDK is not "
+                            "installed — falling back to OpenAI-wire.",
+                            provider,
+                        )
+                        client = OpenAI(api_key=custom_key, base_url=custom_base)
+                        return (_to_async_client(client, final_model) if async_mode
+                                else (client, final_model))
+                    sync_anthropic = AnthropicAuxiliaryClient(
+                        real_client, final_model, custom_key, custom_base, is_oauth=False,
+                    )
+                    if async_mode:
+                        return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
+                    return sync_anthropic, final_model
+                client = OpenAI(api_key=custom_key, base_url=custom_base)
+                # codex_responses or inherited auto-detect (via _wrap_if_needed).
+                # _wrap_if_needed reads the closed-over `api_mode` (the task-level
+                # override). Named-provider entry api_mode=codex_responses also
+                # flows through here.
+                if entry_api_mode == "codex_responses" and not isinstance(
+                    client, CodexAuxiliaryClient
+                ):
+                    client = CodexAuxiliaryClient(client, final_model)
+                else:
+                    client = _wrap_if_needed(client, final_model, custom_base)
                 return (_to_async_client(client, final_model) if async_mode
                         else (client, final_model))
             logger.warning(

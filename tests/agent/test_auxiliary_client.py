@@ -19,6 +19,7 @@ from agent.auxiliary_client import (
     _read_codex_access_token,
     _get_provider_chain,
     _is_payment_error,
+    _normalize_aux_provider,
     _try_payment_fallback,
     _resolve_auto,
 )
@@ -52,6 +53,17 @@ def codex_auth_dir(tmp_path, monkeypatch):
         lambda: "codex-test-token-abc123",
     )
     return codex_dir
+
+
+class TestNormalizeAuxProvider:
+    def test_maps_github_copilot_aliases(self):
+        assert _normalize_aux_provider("github") == "copilot"
+        assert _normalize_aux_provider("github-copilot") == "copilot"
+        assert _normalize_aux_provider("github-models") == "copilot"
+
+    def test_maps_github_copilot_acp_aliases(self):
+        assert _normalize_aux_provider("github-copilot-acp") == "copilot-acp"
+        assert _normalize_aux_provider("copilot-acp-agent") == "copilot-acp"
 
 
 class TestReadCodexAccessToken:
@@ -446,6 +458,34 @@ class TestExplicitProviderRouting:
             assert client is not None
             adapter = client.chat.completions
             assert adapter._is_oauth is False
+
+    def test_explicit_openrouter_pool_exhausted_logs_precise_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)):
+            with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+                client, model = resolve_provider_client("openrouter")
+        assert client is None
+        assert model is None
+        assert any(
+            "credential pool has no usable entries" in record.message
+            for record in caplog.records
+        )
+        assert not any(
+            "OPENROUTER_API_KEY not set" in record.message
+            for record in caplog.records
+        )
+
+    def test_explicit_openrouter_missing_env_keeps_not_set_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
+            with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+                client, model = resolve_provider_client("openrouter")
+        assert client is None
+        assert model is None
+        assert any(
+            "OPENROUTER_API_KEY not set" in record.message
+            for record in caplog.records
+        )
 
 class TestGetTextAuxiliaryClient:
     """Test the full resolution chain for get_text_auxiliary_client."""
