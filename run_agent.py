@@ -10482,7 +10482,7 @@ class AIAgent:
                     ):
                         copilot_auth_retry_attempted = True
                         if self._try_refresh_copilot_client_credentials():
-                            self._vprint(f"{self.log_prefix}🔐 Copilot credentials refreshed after 401. Retrying request...")
+                            self._vprint(f"{self.log_prefix}🔐 Copilot 凭证在 401 后已刷新。正在重试请求...")
                             continue
                     if (
                         self.api_mode == "anthropic_messages"
@@ -11004,18 +11004,18 @@ class AIAgent:
                         # Actionable guidance for common auth errors
                         if classified.is_auth or classified.reason == FailoverReason.billing:
                             if _provider == "openai-codex" and status_code == 401:
-                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
-                                self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
-                                self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
-                                self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth 令牌被拒绝（HTTP 401）。令牌可能已被", force=True)
+                                self._vprint(f"{self.log_prefix}      其他客户端（Codex CLI、VS Code）刷新。修复方法：", force=True)
+                                self._vprint(f"{self.log_prefix}      1. 在终端运行 `codex` 生成新令牌。", force=True)
+                                self._vprint(f"{self.log_prefix}      2. 然后运行 `hermes auth` 重新认证。", force=True)
                             else:
-                                self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
-                                self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
-                                self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
+                                self._vprint(f"{self.log_prefix}   💡 API 密钥被供应商拒绝。请检查：", force=True)
+                                self._vprint(f"{self.log_prefix}      • 密钥是否有效？运行：hermes setup", force=True)
+                                self._vprint(f"{self.log_prefix}      • 你的账户是否有权访问 {_model}？", force=True)
                                 if base_url_host_matches(str(_base), "openrouter.ai"):
-                                    self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                                    self._vprint(f"{self.log_prefix}      • 检查余额：https://openrouter.ai/settings/credits", force=True)
                         else:
-                            self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
+                            self._vprint(f"{self.log_prefix}   💡 此类错误无法通过重试修复。", force=True)
                         logging.error(f"{self.log_prefix}Non-retryable client error: {api_error}")
                         # Skip session persistence when the error is likely
                         # context-overflow related (status 400 + large session).
