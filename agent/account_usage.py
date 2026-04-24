@@ -91,18 +91,18 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
     header = f"📈 {'**' if markdown else ''}{snapshot.title}{'**' if markdown else ''}"
     lines = [header]
     if snapshot.plan:
-        lines.append(f"Provider: {snapshot.provider} ({snapshot.plan})")
+        lines.append(f"供应商: {snapshot.provider} ({snapshot.plan})")
     else:
-        lines.append(f"Provider: {snapshot.provider}")
+        lines.append(f"供应商: {snapshot.provider}")
     for window in snapshot.windows:
         if window.used_percent is None:
-            base = f"{window.label}: unavailable"
+            base = f"{window.label}: 不可用"
         else:
             remaining = max(0, round(100 - float(window.used_percent)))
             used = max(0, round(float(window.used_percent)))
-            base = f"{window.label}: {remaining}% remaining ({used}% used)"
+            base = f"{window.label}: 剩余 {remaining}% (已用 {used}%)"
         if window.reset_at:
-            base += f" • resets {_format_reset(window.reset_at)}"
+            base += f" • {_format_reset(window.reset_at)} 重置"
         elif window.detail:
             base += f" • {window.detail}"
         lines.append(base)

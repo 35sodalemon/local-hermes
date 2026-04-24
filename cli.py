@@ -3410,10 +3410,10 @@ class HermesCLI:
             if self._pending_title and self._session_db:
                 try:
                     self._session_db.set_session_title(self.session_id, self._pending_title)
-                    _cprint(f"  Session title applied: {self._pending_title}")
+                    _cprint(f"  Session 标题已设置: {self._pending_title}")
                     self._pending_title = None
                 except (ValueError, Exception) as e:
-                    _cprint(f"  Could not apply pending title: {e}")
+                    _cprint(f"  无法设置标题: {e}")
                     self._pending_title = None
             return True
         except Exception as e:
@@ -3815,7 +3815,7 @@ class HermesCLI:
                         diff_lines = diff.splitlines()
                         if len(diff_lines) > 80:
                             print("\n".join(diff_lines[:80]))
-                            print(f"\n  ... ({len(diff_lines) - 80} more lines, showing first 80)")
+                            print(f"\n  ... (共 {len(diff_lines) - 80} 行，仅显示前 80 行)")
                         else:
                             print(f"\n{diff}")
             else:
@@ -3825,7 +3825,7 @@ class HermesCLI:
         # Resolve checkpoint reference (number or hash)
         checkpoints = mgr.list_checkpoints(cwd)
         if not checkpoints:
-            print(f"  No checkpoints found for {cwd}")
+            print(f"  {cwd} 没有找到检查点")
             return
 
         target_hash = self._resolve_checkpoint_ref(args[0], checkpoints)
@@ -3840,7 +3840,7 @@ class HermesCLI:
             if file_path:
                 print(f"  ✅ Restored {file_path} from checkpoint {result['restored_to']}: {result['reason']}")
             else:
-                print(f"  ✅ Restored to checkpoint {result['restored_to']}: {result['reason']}")
+                print(f"  ✅ 已恢复到检查点 {result['restored_to']}: {result['reason']}")
             print("  A pre-rollback snapshot was saved automatically.")
 
             # Also undo the last conversation turn so the agent's context
@@ -3858,7 +3858,7 @@ class HermesCLI:
             if 0 <= idx < len(checkpoints):
                 return checkpoints[idx]["hash"]
             else:
-                print(f"  Invalid checkpoint number. Use 1-{len(checkpoints)}.")
+                print(f"  无效的检查点序号。请使用 1-{len(checkpoints)}。")
                 return None
         except ValueError:
             # Treat as a git hash
@@ -3906,7 +3906,7 @@ class HermesCLI:
             label = " ".join(parts[2:]) if len(parts) > 2 else None
             snap_id = create_quick_snapshot(label=label)
             if snap_id:
-                print(f"  Snapshot created: {snap_id}")
+                print(f"  快照已创建: {snap_id}")
             else:
                 print("  No state files found to snapshot.")
 
@@ -3926,15 +3926,15 @@ class HermesCLI:
                 if 1 <= idx <= len(snaps):
                     snap_id = snaps[idx - 1]["id"]
                 else:
-                    print(f"  Invalid snapshot number. Use 1-{len(snaps)}.")
+                    print(f"  无效的快照序号。请使用 1-{len(snaps)}。")
                     return
             except ValueError:
                 pass
             if restore_quick_snapshot(snap_id):
-                print(f"  Restored state from: {snap_id}")
+                print(f"  已从快照恢复: {snap_id}")
                 print("  Restart recommended for state.db changes to take effect.")
             else:
-                print(f"  Snapshot not found: {snap_id}")
+                print(f"  快照未找到: {snap_id}")
 
         elif subcmd == "prune":
             keep = 20
@@ -3966,9 +3966,9 @@ class HermesCLI:
             print("  No running background processes.")
             return
 
-        print(f"  Stopping {len(running)} background process(es)...")
+        print(f"  正在停止 {len(running)} 个后台进程...")
         killed = process_registry.kill_all()
-        print(f"  ✅ Stopped {killed} process(es).")
+        print(f"  ✅ 已停止 {killed} 个进程。")
 
     def _handle_agents_command(self):
         """Handle /agents — show background processes and agent status."""
@@ -3978,14 +3978,14 @@ class HermesCLI:
         running = [p for p in processes if p.get("status") == "running"]
         finished = [p for p in processes if p.get("status") != "running"]
 
-        _cprint(f"  Running processes: {len(running)}")
+        _cprint(f"  运行中的进程: {len(running)}")
         for p in running:
             cmd = p.get("command", "")[:80]
             up = format_uptime_short(p.get("uptime_seconds", 0))
             _cprint(f"    {p.get('session_id', '?')} · {up} · {cmd}")
 
         if finished:
-            _cprint(f"  Recently finished: {len(finished)}")
+            _cprint(f"  最近完成: {len(finished)}")
 
         agent_running = getattr(self, "_agent_running", False)
         _cprint(f"  Agent: {'running' if agent_running else 'idle'}")
@@ -4039,7 +4039,7 @@ class HermesCLI:
 
         assistant = [m for m in self.conversation_history if m.get("role") == "assistant"]
         if not assistant:
-            _cprint("  Nothing to copy yet.")
+            _cprint("  暂无可复制内容。")
             return
 
         if arg:
@@ -4061,14 +4061,14 @@ class HermesCLI:
 
         text = _assistant_copy_text(assistant[idx].get("content"))
         if not text:
-            _cprint("  Nothing to copy in that assistant response.")
+            _cprint("  该助手响应中没有可复制内容。")
             return
 
         try:
             self._write_osc52_clipboard(text)
-            _cprint(f"  Copied assistant response #{idx + 1} to clipboard")
+            _cprint(f"  已复制助手响应 #{idx + 1} 到剪贴板")
         except Exception as e:
-            _cprint(f"  Clipboard copy failed: {e}")
+            _cprint(f"  剪贴板复制失败: {e}")
 
     def _handle_image_command(self, cmd_original: str):
         """Handle /image <path> — attach a local image file for the next prompt."""
@@ -4489,7 +4489,7 @@ class HermesCLI:
 
         print()
         print(f"  Profile: {profile_name}")
-        print(f"  Home:    {display}")
+        print(f"  主目录:  {display}")
         print()
 
     def show_config(self):
@@ -4528,12 +4528,12 @@ class HermesCLI:
             ssh_host = os.getenv("TERMINAL_SSH_HOST", "not set")
             ssh_user = os.getenv("TERMINAL_SSH_USER", "not set")
             ssh_port = os.getenv("TERMINAL_SSH_PORT", "22")
-            print(f"  SSH Target:   {ssh_user}@{ssh_host}:{ssh_port}")
-        print(f"  Working Dir:  {terminal_cwd}")
-        print(f"  Timeout:      {terminal_timeout}s")
+            print(f"  SSH 目标:     {ssh_user}@{ssh_host}:{ssh_port}")
+        print(f"  工作目录:     {terminal_cwd}")
+        print(f"  超时:         {terminal_timeout}s")
         print()
         print("  -- Agent --")
-        print(f"  Max Turns:  {self.max_turns}")
+        print(f"  最大轮次:   {self.max_turns}")
         print(f"  Toolsets:   {', '.join(self.enabled_toolsets) if self.enabled_toolsets else 'all'}")
         print(f"  Verbose:    {self.verbose}")
         print()
@@ -5841,7 +5841,7 @@ class HermesCLI:
         try:
             config = load_gateway_config()
             
-            print("  Messaging Platform Configuration:")
+            print("  消息平台配置:")
             print("  " + "-" * 55)
             
             platform_status = {
@@ -5855,33 +5855,33 @@ class HermesCLI:
                 if pconfig and pconfig.enabled:
                     home = config.get_home_channel(platform)
                     home_str = f" → {home.name}" if home else ""
-                    print(f"    ✓ {name:<12} Enabled{home_str}")
+                    print(f"    ✓ {name:<12} 已启用{home_str}")
                 else:
-                    print(f"    ○ {name:<12} Not configured ({env_var})")
+                    print(f"    ○ {name:<12} 未配置 ({env_var})")
             
             print()
-            print("  Session Reset Policy:")
+            print("  Session 重置策略:")
             print("  " + "-" * 55)
             policy = config.default_reset_policy
-            print(f"    Mode: {policy.mode}")
-            print(f"    Daily reset at: {policy.at_hour}:00")
-            print(f"    Idle timeout: {policy.idle_minutes} minutes")
+            print(f"    模式: {policy.mode}")
+            print(f"    每日重置时间: {policy.at_hour}:00")
+            print(f"    空闲超时: {policy.idle_minutes} 分钟")
             
             print()
-            print("  To start the gateway:")
+            print("  启动网关:")
             print("    python cli.py --gateway")
             print()
-            print(f"  Configuration file: {display_hermes_home()}/config.yaml")
+            print(f"  配置文件: {display_hermes_home()}/config.yaml")
             print()
             
         except Exception as e:
-            print(f"  Error loading gateway config: {e}")
+            print(f"  加载网关配置出错: {e}")
             print()
-            print("  To configure the gateway:")
-            print("    1. Set environment variables:")
+            print("  配置网关:")
+            print("    1. 设置环境变量:")
             print("       TELEGRAM_BOT_TOKEN=your_token")
             print("       DISCORD_BOT_TOKEN=your_token")
-            print(f"    2. Or configure settings in {display_hermes_home()}/config.yaml")
+            print(f"    2. 或在 {display_hermes_home()}/config.yaml 中配置")
             print()
     
     def process_command(self, command: str) -> bool:
@@ -6068,8 +6068,8 @@ class HermesCLI:
             self._show_session_status()
         elif canonical == "statusbar":
             self._status_bar_visible = not self._status_bar_visible
-            state = "visible" if self._status_bar_visible else "hidden"
-            self._console_print(f"  Status bar {state}")
+            state = "显示" if self._status_bar_visible else "隐藏"
+            self._console_print(f"  状态栏 {state}")
         elif canonical == "verbose":
             self._toggle_verbose()
         elif canonical == "yolo":
@@ -6107,10 +6107,10 @@ class HermesCLI:
                 mgr = get_plugin_manager()
                 plugins = mgr.list_plugins()
                 if not plugins:
-                    print("No plugins installed.")
-                    print(f"Drop plugin directories into {display_hermes_home()}/plugins/ to get started.")
+                    print("没有安装插件。")
+                    print(f"将插件目录放入 {display_hermes_home()}/plugins/ 即可开始。")
                 else:
-                    print(f"Plugins ({len(plugins)}):")
+                    print(f"插件 ({len(plugins)}):")
                     for p in plugins:
                         status = "✓" if p["enabled"] else "✗"
                         version = f" v{p['version']}" if p["version"] else ""
@@ -6122,7 +6122,7 @@ class HermesCLI:
                         error = f" — {p['error']}" if p["error"] else ""
                         print(f"  {status} {p['name']}{version}{detail}{error}")
             except Exception as e:
-                print(f"Plugin system error: {e}")
+                print(f"插件系统错误: {e}")
         elif canonical == "rollback":
             self._handle_rollback_command(cmd_original)
         elif canonical == "snapshot":
@@ -6973,7 +6973,7 @@ class HermesCLI:
             return
 
         if not self.agent:
-            print("(._.) No active agent -- send a message first.")
+            print("(._.) 没有活跃的 agent — 请先发送一条消息。")
             return
 
         if not self.agent.compression_enabled:
@@ -7052,7 +7052,7 @@ class HermesCLI:
         calls = agent.session_api_calls
 
         if calls == 0:
-            print("(._.) No API calls made yet in this session.")
+            print("(._.) 本 session 尚未进行 API 调用。")
             return
 
         # ── Rate limits (shown first when available) ────────────────
@@ -7092,33 +7092,33 @@ class HermesCLI:
         )
         elapsed = format_duration_compact((datetime.now() - self.session_start).total_seconds())
 
-        print("  📊 Session Token Usage")
+        print("  📊 Session Token 用量")
         print(f"  {'─' * 40}")
-        print(f"  Model:                     {agent.model}")
-        print(f"  Input tokens:              {input_tokens:>10,}")
-        print(f"  Cache read tokens:         {cache_read_tokens:>10,}")
-        print(f"  Cache write tokens:        {cache_write_tokens:>10,}")
-        print(f"  Output tokens:             {output_tokens:>10,}")
-        print(f"  Prompt tokens (total):     {prompt:>10,}")
-        print(f"  Completion tokens:         {completion:>10,}")
-        print(f"  Total tokens:              {total:>10,}")
-        print(f"  API calls:                 {calls:>10,}")
-        print(f"  Session duration:          {elapsed:>10}")
-        print(f"  Cost status:              {cost_result.status:>10}")
-        print(f"  Cost source:              {cost_result.source:>10}")
+        print(f"  模型:                       {agent.model}")
+        print(f"  输入 tokens:               {input_tokens:>10,}")
+        print(f"  缓存读取 tokens:           {cache_read_tokens:>10,}")
+        print(f"  缓存写入 tokens:           {cache_write_tokens:>10,}")
+        print(f"  输出 tokens:               {output_tokens:>10,}")
+        print(f"  提示 tokens (总计):        {prompt:>10,}")
+        print(f"  补全 tokens:               {completion:>10,}")
+        print(f"  总 tokens:                 {total:>10,}")
+        print(f"  API 调用:                  {calls:>10,}")
+        print(f"  Session 时长:              {elapsed:>10}")
+        print(f"  费用状态:                  {cost_result.status:>10}")
+        print(f"  费用来源:                  {cost_result.source:>10}")
         if cost_result.amount_usd is not None:
             prefix = "~" if cost_result.status == "estimated" else ""
-            print(f"  Total cost:              {prefix}${float(cost_result.amount_usd):>10.4f}")
+            print(f"  总费用:                   {prefix}${float(cost_result.amount_usd):>10.4f}")
         elif cost_result.status == "included":
-            print(f"  Total cost:              {'included':>10}")
+            print(f"  总费用:                   {'已包含':>10}")
         else:
-            print(f"  Total cost:              {'n/a':>10}")
+            print(f"  总费用:                   {'不可用':>10}")
         print(f"  {'─' * 40}")
-        print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
-        print(f"  Messages:         {msg_count}")
-        print(f"  Compressions:     {compressions}")
+        print(f"  当前上下文:      {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+        print(f"  消息数:           {msg_count}")
+        print(f"  压缩次数:         {compressions}")
         if cost_result.status == "unknown":
-            print(f"  Note:             Pricing unknown for {agent.model}")
+            print(f"  注意:             {agent.model} 的定价未知")
 
         # Account limits -- fetched off-thread with a hard timeout so slow
         # provider APIs don't hang the prompt.

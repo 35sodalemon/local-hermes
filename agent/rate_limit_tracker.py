@@ -182,26 +182,26 @@ def _bucket_line(label: str, bucket: RateLimitBucket, label_width: int = 14) -> 
 def format_rate_limit_display(state: RateLimitState) -> str:
     """Format rate limit state for terminal/chat display."""
     if not state.has_data:
-        return "No rate limit data yet — make an API request first."
+        return "暂无速率限制数据 — 请先发起一次 API 请求。"
 
     age = state.age_seconds
     if age < 5:
-        freshness = "just now"
+        freshness = "刚刚"
     elif age < 60:
-        freshness = f"{int(age)}s ago"
+        freshness = f"{int(age)}秒前"
     else:
-        freshness = f"{_fmt_seconds(age)} ago"
+        freshness = f"{_fmt_seconds(age)}前"
 
     provider_label = state.provider.title() if state.provider else "Provider"
 
     lines = [
-        f"{provider_label} Rate Limits (captured {freshness}):",
+        f"{provider_label} 速率限制 (捕获于 {freshness}):",
         "",
-        _bucket_line("Requests/min", state.requests_min),
-        _bucket_line("Requests/hr", state.requests_hour),
+        _bucket_line("请求/分", state.requests_min),
+        _bucket_line("请求/时", state.requests_hour),
         "",
-        _bucket_line("Tokens/min", state.tokens_min),
-        _bucket_line("Tokens/hr", state.tokens_hour),
+        _bucket_line("Tokens/分", state.tokens_min),
+        _bucket_line("Tokens/时", state.tokens_hour),
     ]
 
     # Add warnings if any bucket is getting hot
@@ -214,7 +214,7 @@ def format_rate_limit_display(state: RateLimitState) -> str:
     ]:
         if bucket.limit > 0 and bucket.usage_pct >= 80:
             reset = _fmt_seconds(bucket.remaining_seconds_now)
-            warnings.append(f"  ⚠ {label} at {bucket.usage_pct:.0f}% — resets in {reset}")
+            warnings.append(f"  ⚠ {label} 已用 {bucket.usage_pct:.0f}% — {reset} 后重置")
 
     if warnings:
         lines.append("")
@@ -226,7 +226,7 @@ def format_rate_limit_display(state: RateLimitState) -> str:
 def format_rate_limit_compact(state: RateLimitState) -> str:
     """One-line compact summary for status bars / gateway messages."""
     if not state.has_data:
-        return "No rate limit data."
+        return "暂无速率限制数据。"
 
     rm = state.requests_min
     tm = state.tokens_min
