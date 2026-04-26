@@ -127,7 +127,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="[name]"),
     CommandDef("voice", "切换语音模式", "配置",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
-    CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
+    CommandDef("busy", "控制工作时 Enter 键的行为", "配置",
                cli_only=True, args_hint="[queue|interrupt|status]",
                subcommands=("queue", "interrupt", "status")),
 

@@ -7754,7 +7754,7 @@ class HermesCLI:
             else:
                 self._enable_voice_mode()
         else:
-            _cprint(f"Unknown voice subcommand: {subcommand}")
+            _cprint(f"未知的语音子命令: {subcommand}")
             _cprint("用法：/voice [on|off|tts|status]")
 
     def _voice_beeps_enabled(self) -> bool:
