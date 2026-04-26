@@ -103,7 +103,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # 配置
     CommandDef("config", "显示当前配置", "配置",
                cli_only=True),
-    CommandDef("model", "切换模型", "配置", args_hint="[模型] [--provider name] [--global]"),
+    CommandDef("model", "切换模型", "配置",
+               aliases=("provider",), args_hint="[模型] [--provider name] [--global]"),
     CommandDef("gquota", "查看 Google Gemini Code Assist 配额使用情况", "信息",
                cli_only=True),
 
@@ -126,6 +127,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="[name]"),
     CommandDef("voice", "切换语音模式", "配置",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
+    CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
+               cli_only=True, args_hint="[queue|interrupt|status]",
+               subcommands=("queue", "interrupt", "status")),
 
     # 工具与技能
     CommandDef("tools", "管理工具（列表/启用/禁用）", "工具与技能",

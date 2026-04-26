@@ -22,6 +22,7 @@ import re
 import concurrent.futures
 import base64
 import atexit
+import errno
 import tempfile
 import time
 import uuid
@@ -3187,7 +3188,14 @@ class HermesCLI:
         # the configured model (e.g. "qwen3.6-plus"), causing 400 errors.
         runtime_model = runtime.get("model")
         if runtime_model and isinstance(runtime_model, str):
-            self.model = runtime_model
+            # Only use runtime model if: model is unset, or model equals provider name
+            should_use_runtime_model = (
+                not self.model or  # No model configured yet
+                self.model == self.provider or  # Model is the provider slug
+                self.model == runtime.get("name")  # Model matches provider display name
+            )
+            if should_use_runtime_model:
+                self.model = runtime_model
 
         # If model is still empty (e.g. user ran `hermes auth add openai-codex`
         # without `hermes model`), fall back to the provider's first catalog
@@ -4322,7 +4330,7 @@ class HermesCLI:
 
         _cprint(f"\n  {_DIM}Tip: Just type your message to chat with Hermes!{_RST}")
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
-        _cprint(f"  {_DIM}Draft editor: Ctrl+G{_RST}")
+        _cprint(f"  {_DIM}Draft editor: Ctrl+G (Alt+G in VSCode/Cursor){_RST}")
         if _is_termux_environment():
             _cprint(f"  {_DIM}Attach image: /image {_termux_example_image_path()} or start your prompt with a local image path{_RST}\n")
         else:
@@ -4671,10 +4679,6 @@ class HermesCLI:
     def new_session(self, silent=False):
         """Start a fresh session with a new session ID and cleared agent state."""
         if self.agent and self.conversation_history:
-            try:
-                self.agent.flush_memories(self.conversation_history)
-            except (Exception, KeyboardInterrupt):
-                pass
             # Trigger memory extraction on the old session before session_id rotates.
             self.agent.commit_memory_session(self.conversation_history)
             self._notify_session_boundary("on_session_finalize")
@@ -5280,23 +5284,21 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
+        # Load providers for switch_model (picker path needs them below)
         user_provs = None
         custom_provs = None
+        try:
+            from hermes_cli.config import get_compatible_custom_providers, load_config
+            cfg = load_config()
+            user_provs = cfg.get("providers")
+            custom_provs = get_compatible_custom_providers(cfg)
+        except Exception:
+            pass
 
         # No args at all: open prompt_toolkit-native picker modal
         if not model_input and not explicit_provider:
             model_display = self.model or "unknown"
             provider_display = get_label(self.provider) if self.provider else "unknown"
-
-            user_provs = None
-            custom_provs = None
-            try:
-                from hermes_cli.config import get_compatible_custom_providers, load_config
-                cfg = load_config()
-                user_provs = cfg.get("providers")
-                custom_provs = get_compatible_custom_providers(cfg)
-            except Exception:
-                pass
 
             try:
                 providers = list_authenticated_providers(
@@ -5384,29 +5386,26 @@ class HermesCLI:
         _cprint(f"  ✓ Model switched: {result.new_model}")
         _cprint(f"    Provider: {provider_label}")
 
-        # Rich metadata from models.dev
+        # Context: always resolve via the provider-aware chain so Codex OAuth,
+        # Copilot, and Nous-enforced caps win over the raw models.dev entry
+        # (e.g. gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
         mi = result.model_info
+        from hermes_cli.model_switch import resolve_display_context_length
+        ctx = resolve_display_context_length(
+            result.new_model,
+            result.target_provider,
+            base_url=result.base_url or self.base_url or "",
+            api_key=result.api_key or self.api_key or "",
+            model_info=mi,
+        )
+        if ctx:
+            _cprint(f"    Context: {ctx:,} tokens")
         if mi:
-            if mi.context_window:
-                _cprint(f"    Context: {mi.context_window:,} tokens")
             if mi.max_output:
                 _cprint(f"    Max output: {mi.max_output:,} tokens")
             if mi.has_cost_data():
                 _cprint(f"    Cost: {mi.format_cost()}")
             _cprint(f"    Capabilities: {mi.format_capabilities()}")
-        else:
-            # Fallback to old context length lookup
-            try:
-                from agent.model_metadata import get_model_context_length
-                ctx = get_model_context_length(
-                    result.new_model,
-                    base_url=result.base_url or self.base_url,
-                    api_key=result.api_key or self.api_key,
-                    provider=result.target_provider,
-                )
-                _cprint(f"    Context: {ctx:,} tokens")
-            except Exception:
-                pass
 
         # Cache notice
         cache_enabled = (
@@ -6174,6 +6173,8 @@ class HermesCLI:
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
+        elif canonical == "busy":
+            self._handle_busy_command(cmd_original)
         else:
             # Check for user-defined quick commands (bypass agent loop, no LLM call)
             base_cmd = cmd_lower.split()[0]
@@ -6910,6 +6911,36 @@ class HermesCLI:
         else:
             _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only){_RST}")
 
+    def _handle_busy_command(self, cmd: str):
+        """Handle /busy — control what Enter does while Hermes is working.
+
+        Usage:
+            /busy               Show current busy input mode
+            /busy status        Show current busy input mode
+            /busy queue         Queue input for the next turn instead of interrupting
+            /busy interrupt     Interrupt the current run on Enter (default)
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        if len(parts) < 2 or parts[1].strip().lower() == "status":
+            _cprint(f"  {_ACCENT}Busy input mode: {self.busy_input_mode}{_RST}")
+            _cprint(f"  {_DIM}Enter while busy: {'queues for next turn' if self.busy_input_mode == 'queue' else 'interrupts current run'}{_RST}")
+            _cprint(f"  {_DIM}Usage: /busy [queue|interrupt|status]{_RST}")
+            return
+
+        arg = parts[1].strip().lower()
+        if arg not in {"queue", "interrupt"}:
+            _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+            _cprint(f"  {_DIM}Usage: /busy [queue|interrupt|status]{_RST}")
+            return
+
+        self.busy_input_mode = arg
+        if save_config_value("display.busy_input_mode", arg):
+            behavior = "Enter will queue follow-up input while Hermes is busy." if arg == "queue" else "Enter will interrupt the current run while Hermes is busy."
+            _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' (saved to config){_RST}")
+            _cprint(f"  {_DIM}{behavior}{_RST}")
+        else:
+            _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' (session only){_RST}")
+
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
         if not self._fast_command_available():
@@ -6988,51 +7019,52 @@ class HermesCLI:
                 focus_topic = parts[1].strip()
 
         original_count = len(self.conversation_history)
-        try:
-            from agent.model_metadata import estimate_messages_tokens_rough
-            from agent.manual_compression_feedback import summarize_manual_compression
-            original_history = list(self.conversation_history)
-            approx_tokens = estimate_messages_tokens_rough(original_history)
-            if focus_topic:
-                print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens), "
-                      f"focus: \"{focus_topic}\"...")
-            else:
-                print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens)...")
+        with self._busy_command("Compressing context..."):
+            try:
+                from agent.model_metadata import estimate_messages_tokens_rough
+                from agent.manual_compression_feedback import summarize_manual_compression
+                original_history = list(self.conversation_history)
+                approx_tokens = estimate_messages_tokens_rough(original_history)
+                if focus_topic:
+                    print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens), "
+                          f"focus: \"{focus_topic}\"...")
+                else:
+                    print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens)...")
 
-            compressed, _ = self.agent._compress_context(
-                original_history,
-                self.agent._cached_system_prompt or "",
-                approx_tokens=approx_tokens,
-                focus_topic=focus_topic or None,
-            )
-            self.conversation_history = compressed
-            # _compress_context ends the old session and creates a new child
-            # session on the agent (run_agent.py::_compress_context). Sync the
-            # CLI's session_id so /status, /resume, exit summary, and title
-            # generation all point at the live continuation session, not the
-            # ended parent. Without this, subsequent end_session() calls target
-            # the already-closed parent and the child is orphaned.
-            if (
-                getattr(self.agent, "session_id", None)
-                and self.agent.session_id != self.session_id
-            ):
-                self.session_id = self.agent.session_id
-                self._pending_title = None
-            new_tokens = estimate_messages_tokens_rough(self.conversation_history)
-            summary = summarize_manual_compression(
-                original_history,
-                self.conversation_history,
-                approx_tokens,
-                new_tokens,
-            )
-            icon = "🗜️" if summary["noop"] else "✅"
-            print(f"  {icon} {summary['headline']}")
-            print(f"     {summary['token_line']}")
-            if summary["note"]:
-                print(f"     {summary['note']}")
+                compressed, _ = self.agent._compress_context(
+                    original_history,
+                    self.agent._cached_system_prompt or "",
+                    approx_tokens=approx_tokens,
+                    focus_topic=focus_topic or None,
+                )
+                self.conversation_history = compressed
+                # _compress_context ends the old session and creates a new child
+                # session on the agent (run_agent.py::_compress_context). Sync the
+                # CLI's session_id so /status, /resume, exit summary, and title
+                # generation all point at the live continuation session, not the
+                # ended parent. Without this, subsequent end_session() calls target
+                # the already-closed parent and the child is orphaned.
+                if (
+                    getattr(self.agent, "session_id", None)
+                    and self.agent.session_id != self.session_id
+                ):
+                    self.session_id = self.agent.session_id
+                    self._pending_title = None
+                new_tokens = estimate_messages_tokens_rough(self.conversation_history)
+                summary = summarize_manual_compression(
+                    original_history,
+                    self.conversation_history,
+                    approx_tokens,
+                    new_tokens,
+                )
+                icon = "🗜️" if summary["noop"] else "✅"
+                print(f"  {icon} {summary['headline']}")
+                print(f"     {summary['token_line']}")
+                if summary["note"]:
+                    print(f"     {summary['note']}")
 
-        except Exception as e:
-            print(f"  ❌ Compression failed: {e}")
+            except Exception as e:
+                print(f"  ❌ Compression failed: {e}")
 
     def _handle_debug_command(self):
         """Handle /debug — upload debug report + logs and print paste URLs."""
@@ -9284,14 +9316,18 @@ class HermesCLI:
             """Ctrl+Enter (c-j) inserts a newline. Most terminals send c-j for Ctrl+Enter."""
             event.current_buffer.insert_text('\n')
 
-        @kb.add(
-            'c-g',
-            filter=Condition(
-                lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state
-            ),
+        # VSCode/Cursor bind Ctrl+G to "Find Next" at the editor level, so
+        # the keystroke never reaches the embedded terminal. Alt+G is unbound
+        # in those IDEs and arrives here as ('escape', 'g') — register it as
+        # a fallback so the editor handoff works inside Cursor/VSCode too.
+        _editor_filter = Condition(
+            lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state
         )
+
+        @kb.add('c-g', filter=_editor_filter)
+        @kb.add('escape', 'g', filter=_editor_filter)
         def handle_open_in_editor(event):
-            """Ctrl+G opens the current draft in an external editor."""
+            """Ctrl+G (or Alt+G in VSCode/Cursor) opens the current draft in an external editor."""
             cli_ref._open_external_editor(event.current_buffer)
 
         @kb.add('tab', eager=True)
@@ -9534,9 +9570,20 @@ class HermesCLI:
         
         @kb.add('c-d')
         def handle_ctrl_d(event):
-            """Handle Ctrl+D - exit."""
-            self._should_exit = True
-            event.app.exit()
+            """Ctrl+D: delete char under cursor (standard readline behaviour).
+            Only exit when the input is empty — same as bash/zsh. Pending
+            attached images count as input and block the EOF-exit so the
+            user doesn't lose them silently.
+            """
+            buf = event.app.current_buffer
+            if buf.text:
+                buf.delete()
+            elif self._attached_images:
+                # Empty text but pending attachments — no-op, don't exit.
+                return
+            else:
+                self._should_exit = True
+                event.app.exit()
 
         _modal_prompt_active = Condition(
             lambda: bool(self._secret_state or self._sudo_state)
@@ -9744,6 +9791,11 @@ class HermesCLI:
                 completer=_completer,
             ),
         )
+        # Keep prompt_toolkit on its simple tempfile path. Setting
+        # buffer.tempfile = "prompt.md" triggers its complex-tempfile branch,
+        # which tries to mkdir() the mkdtemp() directory again and raises
+        # EEXIST. The suffix keeps markdown highlighting without that bug.
+        input_area.buffer.tempfile_suffix = '.md'
 
         # Dynamic height: accounts for both explicit newlines AND visual
         # wrapping of long lines so the input area always fits its content.
@@ -10696,6 +10748,8 @@ class HermesCLI:
                 return  # silently suppress
             if isinstance(exc, KeyError) and "is not registered" in str(exc):
                 return  # suppress selector registration failures (#6393)
+            if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EIO:
+                return  # suppress I/O errors from broken stdout on interrupt (#13710)
             # Fall back to default handler for everything else
             loop.default_exception_handler(context)
 
@@ -10728,9 +10782,11 @@ class HermesCLI:
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
         except (KeyError, OSError) as _stdin_err:
-            # Catch selector registration failures from broken stdin (#6393).
-            # This is the fallback for cases that slip past the fstat() guard.
-            if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+            # Catch selector registration failures from broken stdin (#6393)
+            # and I/O errors from broken stdout during interrupt (#13710).
+            if isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EIO:
+                pass  # suppress broken-stdout I/O errors on interrupt (#13710)
+            elif "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
                 print(
                     f"\nError: stdin is not usable ({_stdin_err}).\n"
                     "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
@@ -10748,12 +10804,6 @@ class HermesCLI:
                 try:
                     self.agent.interrupt()
                 except Exception:
-                    pass
-            # Flush memories before exit (only for substantial conversations)
-            if self.agent and self.conversation_history:
-                try:
-                    self.agent.flush_memories(self.conversation_history)
-                except (Exception, KeyboardInterrupt):
                     pass
             # Shut down voice recorder (release persistent audio stream)
             if hasattr(self, '_voice_recorder') and self._voice_recorder:

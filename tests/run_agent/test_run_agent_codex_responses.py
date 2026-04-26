@@ -943,6 +943,140 @@ def test_normalize_codex_response_marks_commentary_only_message_as_incomplete(mo
     assert "inspect the repository" in (assistant_message.content or "")
 
 
+def test_normalize_codex_response_preserves_message_status_for_replay(monkeypatch):
+    """Incomplete Codex output messages must not be replayed as completed."""
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                id="msg_partial",
+                phase="commentary",
+                status="in_progress",
+                content=[SimpleNamespace(type="output_text", text="Still working...")],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="in_progress",
+        model="gpt-5-codex",
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "incomplete"
+    assert assistant_message.codex_message_items[0]["id"] == "msg_partial"
+    assert assistant_message.codex_message_items[0]["status"] == "in_progress"
+
+
+def test_normalize_codex_response_detects_leaked_tool_call_text(monkeypatch):
+    """Harmony-style `to=functions.foo` leaked into assistant content with no
+    structured function_call items must be treated as incomplete so the
+    continuation path can re-elicit a proper tool call. This is the
+    Taiwan-embassy-email (Discord bug report) failure mode: child agent
+    produces a confident-looking summary, tool_trace is empty because no
+    tools actually ran, parent can't audit the claim.
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    leaked_content = (
+        "I'll check the official page directly.\n"
+        "to=functions.exec_command {\"cmd\": \"curl https://example.test\"}\n"
+        "assistant to=functions.exec_command {\"stdout\": \"mailto:foo@example.test\"}\n"
+        "Extracted: foo@example.test"
+    )
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=leaked_content)],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="completed",
+        model="gpt-5.4",
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "incomplete"
+    # Content is scrubbed so the parent never surfaces the leaked text as a
+    # summary. tool_calls stays empty because no structured function_call
+    # item existed.
+    assert (assistant_message.content or "") == ""
+    assert assistant_message.tool_calls == []
+
+
+def test_normalize_codex_response_ignores_tool_call_text_when_real_tool_call_present(monkeypatch):
+    """If the model emitted BOTH a structured function_call AND some text that
+    happens to contain `to=functions.*` (unlikely but possible), trust the
+    structured call — don't wipe content that came alongside a real tool use.
+    """
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(
+                    type="output_text",
+                    text="Running the command via to=functions.exec_command now.",
+                )],
+            ),
+            SimpleNamespace(
+                type="function_call",
+                id="fc_1",
+                call_id="call_1",
+                name="terminal",
+                arguments="{}",
+            ),
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="completed",
+        model="gpt-5.4",
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "tool_calls"
+    assert assistant_message.tool_calls  # real call preserved
+    assert "Running the command" in (assistant_message.content or "")
+
+
+def test_normalize_codex_response_no_leak_passes_through(monkeypatch):
+    """Sanity: normal assistant content that doesn't contain the leak pattern
+    is returned verbatim with finish_reason=stop."""
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _normalize_codex_response
+
+    response = SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(
+                    type="output_text",
+                    text="Here is the answer with no leak.",
+                )],
+            )
+        ],
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2, total_tokens=6),
+        status="completed",
+        model="gpt-5.4",
+    )
+
+    assistant_message, finish_reason = _normalize_codex_response(response)
+
+    assert finish_reason == "stop"
+    assert assistant_message.content == "Here is the answer with no leak."
+    assert assistant_message.tool_calls == []
+
+
 def test_interim_commentary_is_not_marked_already_streamed_without_callbacks(monkeypatch):
     agent = _build_agent(monkeypatch)
     observed = {}
@@ -1296,6 +1430,44 @@ def test_chat_messages_to_responses_input_reasoning_only_has_following_item(monk
     assert following.get("role") == "assistant"
 
 
+def test_codex_message_item_status_survives_conversion_and_preflight(monkeypatch):
+    """Stored Codex assistant message statuses must survive replay normalization."""
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import (
+        _chat_messages_to_responses_input,
+        _preflight_codex_input_items,
+    )
+
+    items = _chat_messages_to_responses_input([
+        {
+            "role": "assistant",
+            "content": "partial",
+            "codex_message_items": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "id": "msg_incomplete",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "partial"}],
+                }
+            ],
+        }
+    ])
+    replay_item = next(item for item in items if item.get("type") == "message")
+    assert replay_item["status"] == "incomplete"
+
+    normalized = _preflight_codex_input_items([
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "output_text", "text": "working"}],
+        }
+    ])
+    assert normalized[0]["status"] == "in_progress"
+
+
 def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch):
     """Two consecutive reasoning-only responses with different encrypted content
     must NOT be treated as duplicates."""
@@ -1344,6 +1516,58 @@ def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch
     ]
     assert "enc_first" in encrypted_contents
     assert "enc_second" in encrypted_contents
+
+
+def test_duplicate_detection_distinguishes_different_codex_message_items(monkeypatch):
+    """Incomplete turns with new message ids/phases/statuses must not be collapsed."""
+    agent = _build_agent(monkeypatch)
+    responses = [
+        SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    id="msg_first",
+                    phase="commentary",
+                    status="in_progress",
+                    content=[SimpleNamespace(type="output_text", text="Still working...")],
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=50, output_tokens=10, total_tokens=60),
+            status="in_progress",
+            model="gpt-5-codex",
+        ),
+        SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    id="msg_second",
+                    phase="commentary",
+                    status="in_progress",
+                    content=[SimpleNamespace(type="output_text", text="Still working...")],
+                )
+            ],
+            usage=SimpleNamespace(input_tokens=50, output_tokens=10, total_tokens=60),
+            status="in_progress",
+            model="gpt-5-codex",
+        ),
+        _codex_message_response("Final answer after progress updates."),
+    ]
+    monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: responses.pop(0))
+
+    result = agent.run_conversation("keep going")
+
+    assert result["completed"] is True
+    interim_msgs = [
+        msg for msg in result["messages"]
+        if msg.get("role") == "assistant"
+        and msg.get("finish_reason") == "incomplete"
+    ]
+    assert len(interim_msgs) == 2
+    assert [msg["codex_message_items"][0]["id"] for msg in interim_msgs] == [
+        "msg_first",
+        "msg_second",
+    ]
+    assert all(msg["codex_message_items"][0]["status"] == "in_progress" for msg in interim_msgs)
 
 
 def test_chat_messages_to_responses_input_deduplicates_reasoning_ids(monkeypatch):

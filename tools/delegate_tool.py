@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
 from tools import file_state
+from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
 
 
@@ -46,6 +47,64 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
         "execute_code",  # children should reason step-by-step, not write scripts
     ]
 )
+
+
+# ---------------------------------------------------------------------------
+# Subagent approval callbacks
+# ---------------------------------------------------------------------------
+# Subagents run inside a ThreadPoolExecutor worker. The CLI's interactive
+# approval callback is stored in tools/terminal_tool.py's threading.local(),
+# so worker threads do NOT inherit it. Without a callback,
+# prompt_dangerous_approval() falls back to input() from the worker thread,
+# which deadlocks against the parent's prompt_toolkit TUI that owns stdin.
+#
+# Fix: install a non-interactive callback into every subagent worker thread
+# via ThreadPoolExecutor(initializer=_set_subagent_approval_cb, initargs=(cb,)).
+# The callback is chosen by the `delegation.subagent_auto_approve` config:
+#   false (default) → _subagent_auto_deny (safe; matches leaf tool blocklist)
+#   true            → _subagent_auto_approve (opt-in YOLO for cron/batch)
+# Both emit a logger.warning for audit; gateway sessions are unaffected
+# because they resolve approvals via tools/approval.py's per-session queue,
+# not through these TLS callbacks.
+def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
+    """Auto-deny dangerous commands in subagent threads (safe default).
+
+    Returns 'deny' so the subagent sees a refusal it can recover from, and
+    never calls input() (which would deadlock the parent TUI).
+    """
+    logger.warning(
+        "Subagent auto-denied dangerous command: %s (%s). "
+        "Set delegation.subagent_auto_approve: true to allow.",
+        command, description,
+    )
+    return "deny"
+
+
+def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
+    """Auto-approve dangerous commands in subagent threads (opt-in YOLO).
+
+    Only installed when delegation.subagent_auto_approve=true. Returns 'once'
+    so the subagent proceeds without blocking the parent UI.
+    """
+    logger.warning(
+        "Subagent auto-approved dangerous command: %s (%s)",
+        command, description,
+    )
+    return "once"
+
+
+def _get_subagent_approval_callback():
+    """Return the callback to install into subagent worker threads.
+
+    Config key: delegation.subagent_auto_approve (bool, default False).
+    Reads via the same _load_config() path as the rest of delegate_task so
+    priority is config.yaml > (no env override for this knob) > default.
+    """
+    cfg = _load_config()
+    val = cfg.get("subagent_auto_approve", False)
+    if is_truthy_value(val):
+        return _subagent_auto_approve
+    return _subagent_auto_deny
 
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
@@ -276,7 +335,14 @@ def _get_max_concurrent_children() -> int:
     val = cfg.get("max_concurrent_children")
     if val is not None:
         try:
-            return max(1, int(val))
+            result = max(1, int(val))
+            if result > 10:
+                logger.warning(
+                    "delegation.max_concurrent_children=%d: each child consumes API tokens "
+                    "independently. High values multiply cost linearly.",
+                    result,
+                )
+            return result
         except (TypeError, ValueError):
             logger.warning(
                 "delegation.max_concurrent_children=%r is not a valid integer; "
@@ -411,9 +477,15 @@ def _preserve_parent_mcp_toolsets(
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_CHILD_TIMEOUT = 600  # seconds before a child agent is considered stuck
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
-_HEARTBEAT_STALE_CYCLES = (
-    5  # mark child stale after this many heartbeats with no iteration progress
-)
+# Stale-heartbeat thresholds. A child with no API-call progress is either:
+#   - idle between turns (no current_tool) — probably stuck on a slow API call
+#   - inside a tool (current_tool set) — probably running a legitimately long
+#     operation (terminal command, web fetch, large file read)
+# The idle ceiling stays tight so genuinely stuck children don't mask the gateway
+# timeout. The in-tool ceiling is much higher so legit long-running tools get
+# time to finish; child_timeout_seconds (default 600s) is still the hard cap.
+_HEARTBEAT_STALE_CYCLES_IDLE = 5  # 5 * 30s = 150s idle between turns → stale
+_HEARTBEAT_STALE_CYCLES_IN_TOOL = 20  # 20 * 30s = 600s stuck on same tool → stale
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
 
@@ -1201,7 +1273,11 @@ def _run_single_child(
     # Without this, the parent's _last_activity_ts freezes when delegate_task
     # starts and the gateway eventually kills the agent for "no activity".
     _heartbeat_stop = threading.Event()
-    _last_seen_iter = [0]  # mutable container for heartbeat stale detection
+    # Stale detection: track the child's (tool, iteration) pair across
+    # heartbeat cycles. If neither advances, count the cycle as stale.
+    # Different thresholds for idle vs in-tool (see _HEARTBEAT_STALE_CYCLES_*).
+    _last_seen_iter = [0]
+    _last_seen_tool = [None]  # type: list
     _stale_count = [0]
 
     def _heartbeat_loop():
@@ -1219,22 +1295,38 @@ def _run_single_child(
                 child_iter = child_summary.get("api_call_count", 0)
                 child_max = child_summary.get("max_iterations", 0)
 
-                # Stale detection: if iteration count hasn't advanced,
-                # increment stale counter.  After N cycles with no
-                # progress, stop masking the hang so the gateway
-                # inactivity timeout can fire as a last resort.
-                if child_iter <= _last_seen_iter[0]:
-                    _stale_count[0] += 1
-                else:
+                # Stale detection: count cycles where neither the iteration
+                # count nor the current_tool advances. A child running a
+                # legitimately long-running tool (terminal command, web
+                # fetch) keeps current_tool set but doesn't advance
+                # api_call_count — we don't want that to look stale at the
+                # idle threshold.
+                iter_advanced = child_iter > _last_seen_iter[0]
+                tool_changed = child_tool != _last_seen_tool[0]
+                if iter_advanced or tool_changed:
                     _last_seen_iter[0] = child_iter
+                    _last_seen_tool[0] = child_tool
                     _stale_count[0] = 0
+                else:
+                    _stale_count[0] += 1
 
-                if _stale_count[0] >= _HEARTBEAT_STALE_CYCLES:
+                # Pick threshold based on whether the child is currently
+                # inside a tool call. In-tool threshold is high enough to
+                # cover legitimately slow tools; idle threshold stays
+                # tight so the gateway timeout can fire on a truly wedged
+                # child.
+                stale_limit = (
+                    _HEARTBEAT_STALE_CYCLES_IN_TOOL
+                    if child_tool
+                    else _HEARTBEAT_STALE_CYCLES_IDLE
+                )
+                if _stale_count[0] >= stale_limit:
                     logger.warning(
-                        "Subagent %d appears stale (no iteration progress "
-                        "for %d heartbeat cycles) — stopping heartbeat",
+                        "Subagent %d appears stale (no progress for %d "
+                        "heartbeat cycles, tool=%s) — stopping heartbeat",
                         task_index,
                         _stale_count[0],
+                        child_tool or "<none>",
                     )
                     break  # stop touching parent, let gateway timeout fire
 
@@ -1311,7 +1403,15 @@ def _run_single_child(
         # Run child with a hard timeout to prevent indefinite blocking
         # when the child's API call or tool-level HTTP request hangs.
         child_timeout = _get_child_timeout()
-        _timeout_executor = ThreadPoolExecutor(max_workers=1)
+        _timeout_executor = ThreadPoolExecutor(
+            max_workers=1,
+            # Install a non-interactive approval callback in the worker thread
+            # so dangerous-command prompts from the subagent don't fall back to
+            # input() and deadlock the parent's prompt_toolkit TUI.
+            # Callback (deny vs approve) is governed by delegation.subagent_auto_approve.
+            initializer=_set_subagent_approval_cb,
+            initargs=(_get_subagent_approval_callback(),),
+        )
         # Capture the worker thread so the timeout diagnostic can dump its
         # Python stack (see #14726 — 0-API-call hangs are opaque without it).
         _worker_thread_holder: Dict[str, Optional[threading.Thread]] = {"t": None}
@@ -2203,8 +2303,8 @@ DELEGATE_TASK_SCHEMA = {
         "never enter your context window.\n\n"
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
         "1. Single task: provide 'goal' (+ optional context, toolsets)\n"
-        "2. Batch (parallel): provide 'tasks' array with up to delegation.max_concurrent_children items (default 3). "
-        "All run concurrently and results are returned together.\n\n"
+        "2. Batch (parallel): provide 'tasks' array with up to delegation.max_concurrent_children items (default 3, configurable via config.yaml, no hard ceiling). "
+        "All run concurrently and results are returned together. Nested delegation requires role='orchestrator' and delegation.max_spawn_depth >= 2.\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"

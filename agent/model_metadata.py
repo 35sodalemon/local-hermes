@@ -106,9 +106,11 @@ _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
 
 # Descending tiers for context length probing when the model is unknown.
-# We start at 128K (a safe default for most modern models) and step down
-# on context-length errors until one works.
+# We start at 256K (covers GPT-5.x, many current large-context models) and
+# step down on context-length errors until one works.  Tier[0] is also the
+# default fallback when no detection method succeeds.
 CONTEXT_PROBE_TIERS = [
+    256_000,
     128_000,
     64_000,
     32_000,
@@ -1193,12 +1195,14 @@ def get_model_context_length(
     api_key: str = "",
     config_context_length: int | None = None,
     provider: str = "",
+    custom_providers: list | None = None,
 ) -> int:
     """Get the context length for a model.
 
     Resolution order:
     0. Explicit config override (model.context_length or custom_providers per-model)
     1. Persistent cache (previously discovered via probing)
+    1b. AWS Bedrock static table (must precede custom-endpoint probe)
     2. Active endpoint metadata (/models for explicit custom endpoints)
     3. Local server query (for local endpoints)
     4. Anthropic /v1/models API (API-key users only, not OAuth)
@@ -1211,6 +1215,23 @@ def get_model_context_length(
     # 0. Explicit config override — user knows best
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
+
+    # 0b. custom_providers per-model override — check before any probe.
+    # This closes the gap where /model switch and display paths used to fall
+    # back to 128K despite the user having a per-model context_length set.
+    # See #15779.
+    if custom_providers and base_url and model:
+        try:
+            from hermes_cli.config import get_custom_provider_context_length
+            cp_ctx = get_custom_provider_context_length(
+                model=model,
+                base_url=base_url,
+                custom_providers=custom_providers,
+            )
+            if cp_ctx:
+                return cp_ctx
+        except Exception:
+            pass  # fall through to probing
 
     # Normalise provider-prefixed model names (e.g. "local:model-name" →
     # "model-name") so cache lookups and server queries use the bare ID that
@@ -1236,6 +1257,26 @@ def get_model_context_length(
                 _invalidate_cached_context_length(model, base_url)
             else:
                 return cached
+
+    # 1b. AWS Bedrock — use static context length table.
+    # Bedrock's ListFoundationModels API doesn't expose context window sizes,
+    # so we maintain a curated table in bedrock_adapter.py that reflects
+    # AWS-imposed limits (e.g. 200K for Claude models vs 1M on the native
+    # Anthropic API).  This must run BEFORE the custom-endpoint probe at
+    # step 2 — bedrock-runtime.<region>.amazonaws.com is not in
+    # _URL_TO_PROVIDER, so it would otherwise be treated as a custom endpoint,
+    # fail the /models probe (Bedrock doesn't expose that shape), and fall
+    # back to the 128K default before reaching the original step 4b branch.
+    if provider == "bedrock" or (
+        base_url
+        and base_url_hostname(base_url).startswith("bedrock-runtime.")
+        and base_url_host_matches(base_url, "amazonaws.com")
+    ):
+        try:
+            from agent.bedrock_adapter import get_bedrock_context_length
+            return get_bedrock_context_length(model)
+        except ImportError:
+            pass  # boto3 not installed — fall through to generic resolution
 
     # 2. Active endpoint metadata for truly custom/unknown endpoints.
     # Known providers (Copilot, OpenAI, Anthropic, etc.) skip this — their
@@ -1282,19 +1323,7 @@ def get_model_context_length(
         if ctx:
             return ctx
 
-    # 4b. AWS Bedrock — use static context length table.
-    # Bedrock's ListFoundationModels doesn't expose context window sizes,
-    # so we maintain a curated table in bedrock_adapter.py.
-    if provider == "bedrock" or (
-        base_url
-        and base_url_hostname(base_url).startswith("bedrock-runtime.")
-        and base_url_host_matches(base_url, "amazonaws.com")
-    ):
-        try:
-            from agent.bedrock_adapter import get_bedrock_context_length
-            return get_bedrock_context_length(model)
-        except ImportError:
-            pass  # boto3 not installed — fall through to generic resolution
+    # 4b. (Bedrock handled earlier at step 1b — before custom-endpoint probe.)
 
     # 5. Provider-aware lookups (before generic OpenRouter cache)
     # These are provider-specific and take priority over the generic OR cache,
@@ -1343,7 +1372,7 @@ def get_model_context_length(
     # 6. OpenRouter live API metadata (provider-unaware fallback)
     metadata = fetch_model_metadata()
     if model in metadata:
-        return metadata[model].get("context_length", 128000)
+        return metadata[model].get("context_length", DEFAULT_FALLBACK_CONTEXT)
 
     # 8. Hardcoded defaults (fuzzy match — longest key first for specificity)
     # Only check `default_model in model` (is the key a substring of the input).

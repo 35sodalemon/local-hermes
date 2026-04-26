@@ -459,9 +459,10 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_api_missing_context_length_key(self, mock_fetch):
-        """Model in API but without context_length → defaults to 128000."""
+        """Model in API but without context_length → defaults to the top
+        probe tier (currently 256K)."""
         mock_fetch.return_value = {"test/model": {"name": "Test"}}
-        assert get_model_context_length("test/model") == 128000
+        assert get_model_context_length("test/model") == CONTEXT_PROBE_TIERS[0]
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_cache_takes_priority_over_api(self, mock_fetch, tmp_path):
@@ -586,6 +587,57 @@ class TestGetModelContextLength:
         )
 
         assert result == 200000
+
+
+# =========================================================================
+# Bedrock context resolution — must run BEFORE custom-endpoint probe
+# =========================================================================
+
+class TestBedrockContextResolution:
+    """Regression tests for Bedrock context-length resolution order.
+
+    Bug: because ``bedrock-runtime.<region>.amazonaws.com`` is not listed in
+    ``_URL_TO_PROVIDER``, ``_is_known_provider_base_url`` returned False and
+    the custom-endpoint probe at step 2 ran first — fetching ``/models`` from
+    Bedrock (which it doesn't serve), returning the 128K default-fallback
+    before execution ever reached the Bedrock branch.
+
+    Fix: promote the Bedrock branch ahead of the custom-endpoint probe.
+    """
+
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_bedrock_provider_returns_static_table_before_probe(self, mock_fetch):
+        """provider='bedrock' resolves via static table, bypasses /models probe."""
+        ctx = get_model_context_length(
+            "anthropic.claude-opus-4-v1:0",
+            provider="bedrock",
+            base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+        )
+        # Must return the static Bedrock table value (200K for Claude),
+        # NOT DEFAULT_FALLBACK_CONTEXT (128K).
+        assert ctx == 200000
+        mock_fetch.assert_not_called()
+
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_bedrock_url_without_provider_hint(self, mock_fetch):
+        """bedrock-runtime host infers Bedrock even when provider is omitted."""
+        ctx = get_model_context_length(
+            "anthropic.claude-sonnet-4-v1:0",
+            base_url="https://bedrock-runtime.us-west-2.amazonaws.com",
+        )
+        assert ctx == 200000
+        mock_fetch.assert_not_called()
+
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_non_bedrock_url_still_probes(self, mock_fetch):
+        """Non-Bedrock hosts still reach the custom-endpoint probe."""
+        mock_fetch.return_value = {"some-model": {"context_length": 50000}}
+        ctx = get_model_context_length(
+            "some-model",
+            base_url="https://api.example.com/v1",
+        )
+        assert ctx == 50000
+        assert mock_fetch.called
 
 
 # =========================================================================
@@ -763,14 +815,17 @@ class TestContextProbeTiers:
         for i in range(len(CONTEXT_PROBE_TIERS) - 1):
             assert CONTEXT_PROBE_TIERS[i] > CONTEXT_PROBE_TIERS[i + 1]
 
-    def test_first_tier_is_128k(self):
-        assert CONTEXT_PROBE_TIERS[0] == 128_000
+    def test_first_tier_is_256k(self):
+        assert CONTEXT_PROBE_TIERS[0] == 256_000
 
     def test_last_tier_is_8k(self):
         assert CONTEXT_PROBE_TIERS[-1] == 8_000
 
 
 class TestGetNextProbeTier:
+    def test_from_256k(self):
+        assert get_next_probe_tier(256_000) == 128_000
+
     def test_from_128k(self):
         assert get_next_probe_tier(128_000) == 64_000
 
@@ -790,8 +845,8 @@ class TestGetNextProbeTier:
         assert get_next_probe_tier(100_000) == 64_000
 
     def test_above_max_tier(self):
-        """Value above 128K should return 128K."""
-        assert get_next_probe_tier(500_000) == 128_000
+        """Value above 256K should return 256K."""
+        assert get_next_probe_tier(500_000) == 256_000
 
     def test_zero_returns_none(self):
         assert get_next_probe_tier(0) is None

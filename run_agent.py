@@ -40,6 +40,7 @@ from types import SimpleNamespace
 import urllib.request
 import uuid
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, parse_qs, urlunparse
 from openai import OpenAI
 import fire
 from datetime import datetime
@@ -502,6 +503,48 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
     return found
 
 
+def _escape_invalid_chars_in_json_strings(raw: str) -> str:
+    """Escape unescaped control chars inside JSON string values.
+
+    Walks the raw JSON character-by-character, tracking whether we are
+    inside a double-quoted string. Inside strings, replaces literal
+    control characters (0x00-0x1F) that aren't already part of an escape
+    sequence with their ``\\uXXXX`` equivalents. Pass-through for everything
+    else.
+
+    Ported from #12093 — complements the other repair passes in
+    ``_repair_tool_call_arguments`` when ``json.loads(strict=False)`` is
+    not enough (e.g. llama.cpp backends that emit literal apostrophes or
+    tabs alongside other malformations).
+    """
+    out: list[str] = []
+    in_string = False
+    i = 0
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                # Already-escaped char — pass through as-is
+                out.append(ch)
+                out.append(raw[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+            elif ord(ch) < 0x20:
+                out.append(f"\\u{ord(ch):04x}")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     """Attempt to repair malformed tool_call argument JSON.
 
@@ -522,6 +565,23 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     if raw_stripped == "None":
         logger.warning("Sanitized Python-None tool_call arguments for %s", tool_name)
         return "{}"
+
+    # Repair pass 0: llama.cpp backends sometimes emit literal control
+    # characters (tabs, newlines) inside JSON string values. json.loads
+    # with strict=False accepts these and lets us re-serialise the
+    # result into wire-valid JSON without any string surgery. This is
+    # the most common local-model repair case (#12068).
+    try:
+        parsed = json.loads(raw_stripped, strict=False)
+        reserialised = json.dumps(parsed, separators=(",", ":"))
+        if reserialised != raw_stripped:
+            logger.warning(
+                "Repaired unescaped control chars in tool_call arguments for %s",
+                tool_name,
+            )
+        return reserialised
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
 
     # Attempt common JSON repairs
     fixed = raw_stripped
@@ -555,6 +615,21 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
         )
         return fixed
     except json.JSONDecodeError:
+        pass
+
+    # Repair pass 4: escape unescaped control chars inside JSON strings,
+    # then retry. Catches cases where strict=False alone fails because
+    # other malformations are present too.
+    try:
+        escaped = _escape_invalid_chars_in_json_strings(fixed)
+        if escaped != fixed:
+            json.loads(escaped)
+            logger.warning(
+                "Repaired control-char-laced tool_call arguments for %s: %s → %s",
+                tool_name, raw_stripped[:80], escaped[:80],
+            )
+            return escaped
+    except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
     # Last resort: replace with empty object so the API request doesn't
@@ -739,6 +814,11 @@ class AIAgent:
     This class manages the conversation flow, tool execution, and response handling
     for AI models that support function calling.
     """
+
+    _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
+        "[hermes-agent: tool call arguments were corrupted in this session and "
+        "have been dropped to keep the conversation alive. See issue #15236.]"
+    )
 
     @property
     def base_url(self) -> str:
@@ -954,12 +1034,16 @@ class AIAgent:
         # surface.
         # When api_mode was explicitly provided, respect it — the user
         # knows what their endpoint supports (#10473).
+        # Exception: Azure OpenAI serves gpt-5.x on /chat/completions and
+        # does NOT support the Responses API — skip the upgrade for Azure
+        # (openai.azure.com), even though it looks OpenAI-compatible.
         if (
             api_mode is None
             and self.api_mode == "chat_completions"
             and self.provider != "copilot-acp"
             and not str(self.base_url or "").lower().startswith("acp://copilot")
             and not str(self.base_url or "").lower().startswith("acp+tcp://")
+            and not self._is_azure_openai_url()
             and (
                 self._is_direct_openai_url()
                 or self._provider_model_requires_responses_api(
@@ -1235,7 +1319,22 @@ class AIAgent:
             if api_key and base_url:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
-                client_kwargs = {"api_key": api_key, "base_url": base_url}
+                # Extract query params (e.g. Azure api-version) from base_url
+                # and pass via default_query to prevent loss during SDK URL
+                # joining (httpx drops query string when joining paths).
+                _parsed_url = urlparse(base_url)
+                if _parsed_url.query:
+                    _clean_url = urlunparse(_parsed_url._replace(query=""))
+                    _query_params = {
+                        k: v[0] for k, v in parse_qs(_parsed_url.query).items()
+                    }
+                    client_kwargs = {
+                        "api_key": api_key,
+                        "base_url": _clean_url,
+                        "default_query": _query_params,
+                    }
+                else:
+                    client_kwargs = {"api_key": api_key, "base_url": base_url}
                 if _provider_timeout is not None:
                     client_kwargs["timeout"] = _provider_timeout
                 if self.provider == "copilot-acp":
@@ -1437,6 +1536,8 @@ class AIAgent:
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
+        self._memory_write_origin = "assistant_tool"
+        self._memory_write_context = "foreground"
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
@@ -1497,7 +1598,6 @@ class AIAgent:
         self._memory_enabled = False
         self._user_profile_enabled = False
         self._memory_nudge_interval = 10
-        self._memory_flush_min_turns = 6
         self._turns_since_memory = 0
         self._iters_since_skill = 0
         if not skip_memory:
@@ -1506,7 +1606,6 @@ class AIAgent:
                 self._memory_enabled = mem_config.get("memory_enabled", False)
                 self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
-                self._memory_flush_min_turns = int(mem_config.get("flush_min_turns", 6))
                 if self._memory_enabled or self._user_profile_enabled:
                     from tools.memory_tool import MemoryStore
                     self._memory_store = MemoryStore(
@@ -1686,43 +1785,64 @@ class AIAgent:
         # Store for reuse in switch_model (so config override persists across model switches)
         self._config_context_length = _config_context_length
 
+        # Resolve custom_providers list once for reuse below (startup
+        # context-length override and plugin context-engine init).
+        try:
+            from hermes_cli.config import get_compatible_custom_providers
+            _custom_providers = get_compatible_custom_providers(_agent_cfg)
+        except Exception:
+            _custom_providers = _agent_cfg.get("custom_providers")
+            if not isinstance(_custom_providers, list):
+                _custom_providers = []
+
         # Check custom_providers per-model context_length
-        if _config_context_length is None:
+        if _config_context_length is None and _custom_providers:
             try:
-                from hermes_cli.config import get_compatible_custom_providers
-                _custom_providers = get_compatible_custom_providers(_agent_cfg)
+                from hermes_cli.config import get_custom_provider_context_length
+                _cp_ctx_resolved = get_custom_provider_context_length(
+                    model=self.model,
+                    base_url=self.base_url,
+                    custom_providers=_custom_providers,
+                )
+                if _cp_ctx_resolved:
+                    _config_context_length = int(_cp_ctx_resolved)
             except Exception:
-                _custom_providers = _agent_cfg.get("custom_providers")
-                if not isinstance(_custom_providers, list):
-                    _custom_providers = []
-            for _cp_entry in _custom_providers:
-                if not isinstance(_cp_entry, dict):
-                    continue
-                _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
-                if _cp_url and _cp_url == self.base_url.rstrip("/"):
-                    _cp_models = _cp_entry.get("models", {})
-                    if isinstance(_cp_models, dict):
-                        _cp_model_cfg = _cp_models.get(self.model, {})
-                        if isinstance(_cp_model_cfg, dict):
-                            _cp_ctx = _cp_model_cfg.get("context_length")
-                            if _cp_ctx is not None:
-                                try:
-                                    _config_context_length = int(_cp_ctx)
-                                except (TypeError, ValueError):
-                                    logger.warning(
-                                        "Invalid context_length for model %r in "
-                                        "custom_providers: %r — must be a plain "
-                                        "integer (e.g. 256000, not '256K'). "
-                                        "Falling back to auto-detection.",
-                                        self.model, _cp_ctx,
-                                    )
-                                    print(
-                                        f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
-                                        f"  Must be a plain integer (e.g. 256000, not '256K').\n"
-                                        f"  Falling back to auto-detected context window.\n",
-                                        file=sys.stderr,
-                                    )
-                    break
+                _cp_ctx_resolved = None
+
+            # Surface a clear warning if the user set a context_length but it
+            # wasn't a valid positive int — the helper silently skips those.
+            if _config_context_length is None:
+                _target = self.base_url.rstrip("/") if self.base_url else ""
+                for _cp_entry in _custom_providers:
+                    if not isinstance(_cp_entry, dict):
+                        continue
+                    _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
+                    if _target and _cp_url == _target:
+                        _cp_models = _cp_entry.get("models", {})
+                        if isinstance(_cp_models, dict):
+                            _cp_model_cfg = _cp_models.get(self.model, {})
+                            if isinstance(_cp_model_cfg, dict):
+                                _cp_ctx = _cp_model_cfg.get("context_length")
+                                if _cp_ctx is not None:
+                                    try:
+                                        _parsed = int(_cp_ctx)
+                                        if _parsed <= 0:
+                                            raise ValueError
+                                    except (TypeError, ValueError):
+                                        logger.warning(
+                                            "Invalid context_length for model %r in "
+                                            "custom_providers: %r — must be a positive "
+                                            "integer (e.g. 256000, not '256K'). "
+                                            "Falling back to auto-detection.",
+                                            self.model, _cp_ctx,
+                                        )
+                                        print(
+                                            f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
+                                            f"  Must be a positive integer (e.g. 256000, not '256K').\n"
+                                            f"  Falling back to auto-detected context window.\n",
+                                            file=sys.stderr,
+                                        )
+                        break
         
         # Select context engine: config-driven (like memory providers).
         # 1. Check config.yaml context.engine setting
@@ -1772,6 +1892,7 @@ class AIAgent:
                 api_key=getattr(self, "api_key", ""),
                 config_context_length=_config_context_length,
                 provider=self.provider,
+                custom_providers=_custom_providers,
             )
             self.context_compressor.update_model(
                 model=self.model,
@@ -2062,12 +2183,23 @@ class AIAgent:
         # ── Update context compressor ──
         if hasattr(self, "context_compressor") and self.context_compressor:
             from agent.model_metadata import get_model_context_length
+            # Re-read custom_providers from live config so per-model
+            # context_length overrides are honored when switching to a
+            # custom provider mid-session (closes #15779).
+            _sm_custom_providers = None
+            try:
+                from hermes_cli.config import load_config, get_compatible_custom_providers
+                _sm_cfg = load_config()
+                _sm_custom_providers = get_compatible_custom_providers(_sm_cfg)
+            except Exception:
+                _sm_custom_providers = None
             new_context_length = get_model_context_length(
                 self.model,
                 base_url=self.base_url,
                 api_key=self.api_key,
                 provider=self.provider,
                 config_context_length=getattr(self, "_config_context_length", None),
+                custom_providers=_sm_custom_providers,
             )
             self.context_compressor.update_model(
                 model=self.model,
@@ -2231,6 +2363,34 @@ class AIAgent:
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
 
+    def _emit_warning(self, message: str) -> None:
+        """Emit a user-visible warning through the same status plumbing.
+
+        Unlike debug logs, these warnings are meant for degraded side paths
+        such as auxiliary compression or memory flushes where the main turn can
+        continue but the user needs to know something important failed.
+        """
+        try:
+            self._vprint(f"{self.log_prefix}{message}", force=True)
+        except Exception:
+            pass
+        if self.status_callback:
+            try:
+                self.status_callback("warn", message)
+            except Exception:
+                logger.debug("status_callback error in _emit_warning", exc_info=True)
+
+    def _emit_auxiliary_failure(self, task: str, exc: BaseException) -> None:
+        """Surface a compact warning for failed auxiliary work."""
+        try:
+            detail = self._summarize_api_error(exc)
+        except Exception:
+            detail = str(exc)
+        detail = (detail or exc.__class__.__name__).strip()
+        if len(detail) > 220:
+            detail = detail[:217].rstrip() + "..."
+        self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
+
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
         return {
@@ -2290,6 +2450,7 @@ class AIAgent:
                 base_url=aux_base_url,
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                provider=getattr(self, "provider", ""),
             )
 
             # Hard floor: the auxiliary compression model must have at least
@@ -2316,6 +2477,11 @@ class AIAgent:
                 # compression actually works this session.  The hard floor
                 # above guarantees aux_context >= MINIMUM_CONTEXT_LENGTH,
                 # so the new threshold is always >= 64K.
+                #
+                # The compression summariser sends a single user-role
+                # prompt (no system prompt, no tools) to the aux model, so
+                # new_threshold == aux_context is safe: the request is
+                # the raw messages plus a small summarisation instruction.
                 old_threshold = threshold
                 new_threshold = aux_context
                 self.context_compressor.threshold_tokens = new_threshold
@@ -2390,6 +2556,22 @@ class AIAgent:
                 getattr(self, "_base_url_lower", "")
             )
         return hostname == "api.openai.com"
+
+    def _is_azure_openai_url(self, base_url: str = None) -> bool:
+        """Return True when a base URL targets Azure OpenAI.
+
+        Azure OpenAI exposes an OpenAI-compatible endpoint at
+        ``{resource}.openai.azure.com/openai/v1`` that accepts the
+        standard ``openai`` Python client.  Unlike api.openai.com it
+        does NOT support the Responses API — gpt-5.x models are served
+        on the regular ``/chat/completions`` path — so routing decisions
+        must treat Azure separately from direct OpenAI.
+        """
+        if base_url is not None:
+            url = str(base_url).lower()
+        else:
+            url = getattr(self, "_base_url_lower", "") or ""
+        return "openai.azure.com" in url
 
     def _resolved_api_call_timeout(self) -> float:
         """Resolve the effective per-call request timeout in seconds.
@@ -2562,12 +2744,14 @@ class AIAgent:
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
-        
+
         OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
-        'max_completion_tokens'. OpenRouter, local models, and older
+        'max_completion_tokens'. Azure OpenAI also requires
+        'max_completion_tokens' for gpt-5.x models served via the
+        OpenAI-compatible endpoint. OpenRouter, local models, and older
         OpenAI models use 'max_tokens'.
         """
-        if self._is_direct_openai_url():
+        if self._is_direct_openai_url() or self._is_azure_openai_url():
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
@@ -3047,7 +3231,10 @@ class AIAgent:
                         quiet_mode=True,
                         platform=self.platform,
                         provider=self.provider,
+                        parent_session_id=self.session_id,
                     )
+                    review_agent._memory_write_origin = "background_review"
+                    review_agent._memory_write_context = "background_review"
                     review_agent._memory_store = self._memory_store
                     review_agent._memory_enabled = self._memory_enabled
                     review_agent._user_profile_enabled = self._user_profile_enabled
@@ -3081,7 +3268,8 @@ class AIAgent:
                             pass
 
             except Exception as e:
-                logger.debug("Background memory/skill review failed: %s", e)
+                logger.warning("Background memory/skill review failed: %s", e)
+                self._emit_auxiliary_failure("background review", e)
             finally:
                 # Close all resources (httpx client, subprocesses, etc.) so
                 # GC doesn't try to clean them up on a dead asyncio event
@@ -3094,6 +3282,32 @@ class AIAgent:
 
         t = threading.Thread(target=_run_review, daemon=True, name="bg-review")
         t.start()
+
+    def _build_memory_write_metadata(
+        self,
+        *,
+        write_origin: Optional[str] = None,
+        execution_context: Optional[str] = None,
+        task_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build provenance metadata for external memory-provider mirrors."""
+        metadata: Dict[str, Any] = {
+            "write_origin": write_origin or getattr(self, "_memory_write_origin", "assistant_tool"),
+            "execution_context": (
+                execution_context
+                or getattr(self, "_memory_write_context", "foreground")
+            ),
+            "session_id": self.session_id or "",
+            "parent_session_id": self._parent_session_id or "",
+            "platform": self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+            "tool_name": "memory",
+        }
+        if task_id:
+            metadata["task_id"] = task_id
+        if tool_call_id:
+            metadata["tool_call_id"] = tool_call_id
+        return {k: v for k, v in metadata.items() if v not in (None, "")}
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
@@ -3170,6 +3384,7 @@ class AIAgent:
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -4034,6 +4249,49 @@ class AIAgent:
             return
         try:
             self._memory_manager.on_session_end(messages or [])
+        except Exception:
+            pass
+
+    def _sync_external_memory_for_turn(
+        self,
+        *,
+        original_user_message: Any,
+        final_response: Any,
+        interrupted: bool,
+    ) -> None:
+        """Mirror a completed turn into external memory providers.
+
+        Called at the end of ``run_conversation`` with the cleaned user
+        message (``original_user_message``) and the finalised assistant
+        response.  The external memory backend gets both ``sync_all`` (to
+        persist the exchange) and ``queue_prefetch_all`` (to start
+        warming context for the next turn) in one shot.
+
+        Uses ``original_user_message`` rather than ``user_message``
+        because the latter may carry injected skill content that bloats
+        or breaks provider queries.
+
+        Interrupted turns are skipped entirely (#15218).  A partial
+        assistant output, an aborted tool chain, or a mid-stream reset
+        is not durable conversational truth — mirroring it into an
+        external memory backend pollutes future recall with state the
+        user never saw completed.  The prefetch is gated on the same
+        flag: the user's next message is almost certainly a retry of
+        the same intent, and a prefetch keyed on the interrupted turn
+        would fire against stale context.
+
+        Normal completed turns still sync as before.  The whole body is
+        wrapped in ``try/except Exception`` because external memory
+        providers are strictly best-effort — a misconfigured or offline
+        backend must not block the user from seeing their response.
+        """
+        if interrupted:
+            return
+        if not (self._memory_manager and final_response and original_user_message):
+            return
+        try:
+            self._memory_manager.sync_all(original_user_message, final_response)
+            self._memory_manager.queue_prefetch_all(original_user_message)
         except Exception:
             pass
 
@@ -4969,6 +5227,8 @@ class AIAgent:
         # response.incomplete instead of response.completed).
         self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
+            if self._interrupt_requested:
+                raise InterruptedError("Agent interrupted before Codex stream retry")
             collected_output_items: list = []
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
@@ -5263,6 +5523,11 @@ class AIAgent:
         # Other anthropic_messages providers (MiniMax, Alibaba, etc.) use their own keys.
         if self.provider != "anthropic":
             return False
+        # Azure endpoints use static API keys — OAuth token rotation doesn't apply.
+        # Refreshing would pick up ~/.claude/.credentials.json OAuth token and break auth.
+        _base = getattr(self, "_anthropic_base_url", "") or ""
+        if "azure.com" in _base:
+            return False
 
         try:
             from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
@@ -5446,6 +5711,26 @@ class AIAgent:
             self._try_refresh_anthropic_client_credentials()
         return self._anthropic_client.messages.create(**api_kwargs)
 
+    def _rebuild_anthropic_client(self) -> None:
+        """Rebuild the Anthropic client after an interrupt or stale call.
+
+        Handles both direct Anthropic and Bedrock-hosted Anthropic models
+        correctly — rebuilding with the Bedrock SDK when provider is bedrock,
+        rather than always falling back to build_anthropic_client() which
+        requires a direct Anthropic API key.
+        """
+        if getattr(self, "provider", None) == "bedrock":
+            from agent.anthropic_adapter import build_anthropic_bedrock_client
+            region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
+            self._anthropic_client = build_anthropic_bedrock_client(region)
+        else:
+            from agent.anthropic_adapter import build_anthropic_client
+            self._anthropic_client = build_anthropic_client(
+                self._anthropic_api_key,
+                getattr(self, "_anthropic_base_url", None),
+                timeout=get_provider_request_timeout(self.provider, self.model),
+            )
+
     def _interruptible_api_call(self, api_kwargs: dict):
         """
         Run the API call in a background thread so the main conversation loop
@@ -5481,12 +5766,21 @@ class AIAgent:
                     # bedrock responses like chat_completions responses.
                     from agent.bedrock_adapter import (
                         _get_bedrock_runtime_client,
+                        invalidate_runtime_client,
+                        is_stale_connection_error,
                         normalize_converse_response,
                     )
                     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
                     api_kwargs.pop("__bedrock_converse__", None)
                     client = _get_bedrock_runtime_client(region)
-                    raw_response = client.converse(**api_kwargs)
+                    try:
+                        raw_response = client.converse(**api_kwargs)
+                    except Exception as _bedrock_exc:
+                        # Evict the cached client on stale-connection failures
+                        # so the outer retry loop builds a fresh client/pool.
+                        if is_stale_connection_error(_bedrock_exc):
+                            invalidate_runtime_client(region)
+                        raise
                     result["response"] = normalize_converse_response(raw_response)
                 else:
                     request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
@@ -5544,14 +5838,8 @@ class AIAgent:
                 )
                 try:
                     if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
                         self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                            timeout=get_provider_request_timeout(self.provider, self.model),
-                        )
+                        self._rebuild_anthropic_client()
                     else:
                         rc = request_client_holder.get("client")
                         if rc is not None:
@@ -5576,14 +5864,8 @@ class AIAgent:
                 # seed future retries.
                 try:
                     if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
                         self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                            timeout=get_provider_request_timeout(self.provider, self.model),
-                        )
+                        self._rebuild_anthropic_client()
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -5739,12 +6021,21 @@ class AIAgent:
                 try:
                     from agent.bedrock_adapter import (
                         _get_bedrock_runtime_client,
+                        invalidate_runtime_client,
+                        is_stale_connection_error,
                         stream_converse_with_callbacks,
                     )
                     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
                     api_kwargs.pop("__bedrock_converse__", None)
                     client = _get_bedrock_runtime_client(region)
-                    raw_response = client.converse_stream(**api_kwargs)
+                    try:
+                        raw_response = client.converse_stream(**api_kwargs)
+                    except Exception as _bedrock_exc:
+                        # Evict the cached client on stale-connection failures
+                        # so the outer retry loop builds a fresh client/pool.
+                        if is_stale_connection_error(_bedrock_exc):
+                            invalidate_runtime_client(region)
+                        raise
 
                     def _on_text(text):
                         _fire_first()
@@ -5996,11 +6287,25 @@ class AIAgent:
                 for idx in sorted(tool_calls_acc):
                     tc = tool_calls_acc[idx]
                     arguments = tc["function"]["arguments"]
+                    tool_name = tc["function"]["name"] or "?"
                     if arguments and arguments.strip():
                         try:
                             json.loads(arguments)
                         except json.JSONDecodeError:
-                            has_truncated_tool_args = True
+                            # Attempt repair before flagging as truncated.
+                            # Models like GLM-5.1 via Ollama produce trailing
+                            # commas, unclosed brackets, Python None, etc.
+                            # Without repair, these hit the truncation handler
+                            # and kill the session.  _repair_tool_call_arguments
+                            # returns "{}" for unrepairable args, which is far
+                            # better than a crashed session.
+                            repaired = _repair_tool_call_arguments(arguments, tool_name)
+                            if repaired != "{}":
+                                # Successfully repaired — use the fixed args
+                                arguments = repaired
+                            else:
+                                # Unrepairable — flag for truncation handling
+                                has_truncated_tool_args = True
                     mock_tool_calls.append(SimpleNamespace(
                         id=tc["id"],
                         type=tc["type"],
@@ -6098,6 +6403,14 @@ class AIAgent:
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
+                    # Check for interrupt before each retry attempt.  Without
+                    # this, /stop closes the HTTP connection (outer poll loop),
+                    # but the retry loop opens a FRESH connection — negating the
+                    # interrupt entirely.  On slow providers (ollama-cloud) each
+                    # retry can block for the full stream-read timeout (120s+),
+                    # causing multi-minute delays between /stop and response.
+                    if self._interrupt_requested:
+                        raise InterruptedError("Agent interrupted before stream retry")
                     try:
                         if self.api_mode == "anthropic_messages":
                             self._try_refresh_anthropic_client_credentials()
@@ -6424,14 +6737,8 @@ class AIAgent:
             if self._interrupt_requested:
                 try:
                     if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
                         self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                            timeout=get_provider_request_timeout(self.provider, self.model),
-                        )
+                        self._rebuild_anthropic_client()
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -6577,10 +6884,15 @@ class AIAgent:
             # Determine api_mode from provider / base URL / model
             fb_api_mode = "chat_completions"
             fb_base_url = str(fb_client.base_url)
+            _fb_is_azure = self._is_azure_openai_url(fb_base_url)
             if fb_provider == "openai-codex":
                 fb_api_mode = "codex_responses"
             elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
                 fb_api_mode = "anthropic_messages"
+            elif _fb_is_azure:
+                # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
+                # support the Responses API. Stay on chat_completions.
+                fb_api_mode = "chat_completions"
             elif self._is_direct_openai_url(fb_base_url):
                 fb_api_mode = "codex_responses"
             elif self._provider_model_requires_responses_api(
@@ -7423,6 +7735,12 @@ class AIAgent:
             raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
             if raw_reasoning_content is not None:
                 msg["reasoning_content"] = _sanitize_surrogates(raw_reasoning_content)
+            elif msg.get("tool_calls") and self._needs_deepseek_tool_reasoning():
+                # DeepSeek thinking mode requires reasoning_content on every
+                # assistant tool-call message. Without it, replaying the
+                # persisted message causes HTTP 400. Include empty string
+                # as a defensive compatibility fallback (refs #15250).
+                msg["reasoning_content"] = ""
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -7446,6 +7764,13 @@ class AIAgent:
         codex_items = getattr(assistant_message, "codex_reasoning_items", None)
         if codex_items:
             msg["codex_reasoning_items"] = codex_items
+
+        # Codex Responses API: preserve exact assistant message items (with
+        # id/phase) so follow-up turns can replay structured items instead of
+        # flattening to plain text. This is required for prefix cache hits.
+        codex_message_items = getattr(assistant_message, "codex_message_items", None)
+        if codex_message_items:
+            msg["codex_message_items"] = codex_message_items
 
         if assistant_message.tool_calls:
             tool_calls = []
@@ -7498,29 +7823,84 @@ class AIAgent:
 
         return msg
 
-    def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
-        """Copy provider-facing reasoning fields onto an API replay message."""
-        if source_msg.get("role") != "assistant":
-            return
+    def _needs_kimi_tool_reasoning(self) -> bool:
+        """Return True when the current provider is Kimi / Moonshot thinking mode.
 
-        explicit_reasoning = source_msg.get("reasoning_content")
-        if isinstance(explicit_reasoning, str):
-            api_msg["reasoning_content"] = explicit_reasoning
-            return
-
-        normalized_reasoning = source_msg.get("reasoning")
-        if isinstance(normalized_reasoning, str) and normalized_reasoning:
-            api_msg["reasoning_content"] = normalized_reasoning
-            return
-
-        kimi_requires_reasoning = (
+        Kimi ``/coding`` and Moonshot thinking mode both require
+        ``reasoning_content`` on every assistant tool-call message; omitting
+        it causes the next replay to fail with HTTP 400.
+        """
+        return (
             self.provider in {"kimi-coding", "kimi-coding-cn"}
             or base_url_host_matches(self.base_url, "api.kimi.com")
             or base_url_host_matches(self.base_url, "moonshot.ai")
             or base_url_host_matches(self.base_url, "moonshot.cn")
         )
-        if kimi_requires_reasoning and source_msg.get("tool_calls"):
+
+    def _needs_deepseek_tool_reasoning(self) -> bool:
+        """Return True when the current provider is DeepSeek thinking mode.
+
+        DeepSeek V4 thinking mode requires ``reasoning_content`` on every
+        assistant tool-call turn; omitting it causes HTTP 400 when the
+        message is replayed in a subsequent API request (#15250).
+        """
+        provider = (self.provider or "").lower()
+        model = (self.model or "").lower()
+        return (
+            provider == "deepseek"
+            or "deepseek" in model
+            or base_url_host_matches(self.base_url, "api.deepseek.com")
+        )
+
+    def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
+        """Copy provider-facing reasoning fields onto an API replay message."""
+        if source_msg.get("role") != "assistant":
+            return
+
+        # 1. Explicit reasoning_content already set — preserve it verbatim
+        # (includes DeepSeek/Kimi's own empty-string placeholder written at
+        # creation time, and any valid reasoning content from the same provider).
+        existing = source_msg.get("reasoning_content")
+        if isinstance(existing, str):
+            api_msg["reasoning_content"] = existing
+            return
+
+        # 2. DeepSeek / Kimi thinking mode: tool-call turns that lack
+        # reasoning_content are "poisoned history" — a prior provider (MiniMax,
+        # etc.) left them empty. DeepSeek returns HTTP 400 if reasoning_content
+        # is absent on replay; inject "" to satisfy the provider's requirement
+        # without forwarding any cross-provider reasoning content.
+        needs_empty_reasoning = (
+            source_msg.get("tool_calls")
+            and (
+                self._needs_kimi_tool_reasoning()
+                or self._needs_deepseek_tool_reasoning()
+            )
+        )
+        if needs_empty_reasoning:
             api_msg["reasoning_content"] = ""
+            return
+
+        # 3. Healthy session: promote 'reasoning' field to 'reasoning_content'
+        # for providers that use the internal 'reasoning' key.
+        normalized_reasoning = source_msg.get("reasoning")
+        if isinstance(normalized_reasoning, str) and normalized_reasoning:
+            api_msg["reasoning_content"] = normalized_reasoning
+            return
+
+        # 4. DeepSeek / Kimi thinking mode: all assistant messages need
+        # reasoning_content. Inject "" to satisfy the provider's requirement
+        # when no explicit reasoning content is present.
+        if (
+            self._needs_kimi_tool_reasoning()
+            or self._needs_deepseek_tool_reasoning()
+        ):
+            api_msg["reasoning_content"] = ""
+            return
+
+        # 5. reasoning_content was present but not a string (e.g. None after
+        # context compaction).  Don't pass null to the API.
+        api_msg.pop("reasoning_content", None)
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
@@ -7550,6 +7930,115 @@ class AIAgent:
         ]
         return api_msg
 
+    @staticmethod
+    def _sanitize_tool_call_arguments(
+        messages: list,
+        *,
+        logger=None,
+        session_id: str = None,
+    ) -> int:
+        """Repair corrupted assistant tool-call argument JSON in-place."""
+        log = logger or logging.getLogger(__name__)
+        if not isinstance(messages, list):
+            return 0
+
+        repaired = 0
+        marker = AIAgent._TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER
+
+        def _prepend_marker(tool_msg: dict) -> None:
+            existing = tool_msg.get("content")
+            if isinstance(existing, str):
+                if not existing:
+                    tool_msg["content"] = marker
+                elif not existing.startswith(marker):
+                    tool_msg["content"] = f"{marker}\n{existing}"
+                return
+            if existing is None:
+                tool_msg["content"] = marker
+                return
+            try:
+                existing_text = json.dumps(existing)
+            except TypeError:
+                existing_text = str(existing)
+            tool_msg["content"] = f"{marker}\n{existing_text}"
+
+        message_index = 0
+        while message_index < len(messages):
+            msg = messages[message_index]
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                message_index += 1
+                continue
+
+            tool_calls = msg.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                message_index += 1
+                continue
+
+            insert_at = message_index + 1
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if not isinstance(function, dict):
+                    continue
+
+                arguments = function.get("arguments")
+                if arguments is None or arguments == "":
+                    function["arguments"] = "{}"
+                    continue
+                if isinstance(arguments, str) and not arguments.strip():
+                    function["arguments"] = "{}"
+                    continue
+                if not isinstance(arguments, str):
+                    continue
+
+                try:
+                    json.loads(arguments)
+                except json.JSONDecodeError:
+                    tool_call_id = tool_call.get("id")
+                    function_name = function.get("name", "?")
+                    preview = arguments[:80]
+                    log.warning(
+                        "Corrupted tool_call arguments repaired before request "
+                        "(session=%s, message_index=%s, tool_call_id=%s, function=%s, preview=%r)",
+                        session_id or "-",
+                        message_index,
+                        tool_call_id or "-",
+                        function_name,
+                        preview,
+                    )
+                    function["arguments"] = "{}"
+
+                    existing_tool_msg = None
+                    scan_index = message_index + 1
+                    while scan_index < len(messages):
+                        candidate = messages[scan_index]
+                        if not isinstance(candidate, dict) or candidate.get("role") != "tool":
+                            break
+                        if candidate.get("tool_call_id") == tool_call_id:
+                            existing_tool_msg = candidate
+                            break
+                        scan_index += 1
+
+                    if existing_tool_msg is None:
+                        messages.insert(
+                            insert_at,
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "content": marker,
+                            },
+                        )
+                        insert_at += 1
+                    else:
+                        _prepend_marker(existing_tool_msg)
+
+                    repaired += 1
+
+            message_index += 1
+
+        return repaired
+
     def _should_sanitize_tool_calls(self) -> bool:
         """Determine if tool_calls need sanitization for strict APIs.
 
@@ -7562,201 +8051,6 @@ class AIAgent:
             bool: True if sanitization is needed (non-Codex API), False otherwise.
         """
         return self.api_mode != "codex_responses"
-
-    def flush_memories(self, messages: list = None, min_turns: int = None):
-        """Give the model one turn to persist memories before context is lost.
-
-        Called before compression, session reset, or CLI exit. Injects a flush
-        message, makes one API call, executes any memory tool calls, then
-        strips all flush artifacts from the message list.
-
-        Args:
-            messages: The current conversation messages. If None, uses
-                      self._session_messages (last run_conversation state).
-            min_turns: Minimum user turns required to trigger the flush.
-                       None = use config value (flush_min_turns).
-                       0 = always flush (used for compression).
-        """
-        if self._memory_flush_min_turns == 0 and min_turns is None:
-            return
-        if "memory" not in self.valid_tool_names or not self._memory_store:
-            return
-        effective_min = min_turns if min_turns is not None else self._memory_flush_min_turns
-        if self._user_turn_count < effective_min:
-            return
-
-        if messages is None:
-            messages = getattr(self, '_session_messages', None)
-        if not messages or len(messages) < 3:
-            return
-
-        flush_content = (
-            "[System: The session is being compressed. "
-            "Save anything worth remembering — prioritize user preferences, "
-            "corrections, and recurring patterns over task-specific details.]"
-        )
-        _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
-        flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
-        messages.append(flush_msg)
-
-        try:
-            # Build API messages for the flush call
-            _needs_sanitize = self._should_sanitize_tool_calls()
-            api_messages = []
-            for msg in messages:
-                api_msg = msg.copy()
-                self._copy_reasoning_content_for_api(msg, api_msg)
-                api_msg.pop("reasoning", None)
-                api_msg.pop("finish_reason", None)
-                api_msg.pop("_flush_sentinel", None)
-                api_msg.pop("_thinking_prefill", None)
-                if _needs_sanitize:
-                    self._sanitize_tool_calls_for_strict_api(api_msg)
-                api_messages.append(api_msg)
-
-            if self._cached_system_prompt:
-                api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
-
-            # Make one API call with only the memory tool available
-            memory_tool_def = None
-            for t in (self.tools or []):
-                if t.get("function", {}).get("name") == "memory":
-                    memory_tool_def = t
-                    break
-
-            if not memory_tool_def:
-                messages.pop()  # remove flush msg
-                return
-
-            # Use auxiliary client for the flush call when available --
-            # it's cheaper and avoids Codex Responses API incompatibility.
-            from agent.auxiliary_client import (
-                call_llm as _call_llm,
-                _fixed_temperature_for_model,
-                OMIT_TEMPERATURE,
-            )
-            _aux_available = True
-            # Kimi models manage temperature server-side — omit it entirely.
-            # Other models with a fixed contract get that value; everyone else
-            # gets the historical 0.3 default.
-            _fixed_temp = _fixed_temperature_for_model(self.model, self.base_url)
-            _omit_temperature = _fixed_temp is OMIT_TEMPERATURE
-            if _omit_temperature:
-                _flush_temperature = None
-            elif _fixed_temp is not None:
-                _flush_temperature = _fixed_temp
-            else:
-                _flush_temperature = 0.3
-            try:
-                response = _call_llm(
-                    task="flush_memories",
-                    messages=api_messages,
-                    tools=[memory_tool_def],
-                    temperature=_flush_temperature,
-                    max_tokens=5120,
-                    # timeout resolved from auxiliary.flush_memories.timeout config
-                )
-            except RuntimeError:
-                _aux_available = False
-                response = None
-
-            if not _aux_available and self.api_mode == "codex_responses":
-                # No auxiliary client -- use the Codex Responses path directly
-                codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs["tools"] = self._get_transport().convert_tools([memory_tool_def])
-                if _flush_temperature is not None:
-                    codex_kwargs["temperature"] = _flush_temperature
-                else:
-                    codex_kwargs.pop("temperature", None)
-                if "max_output_tokens" in codex_kwargs:
-                    codex_kwargs["max_output_tokens"] = 5120
-                response = self._run_codex_stream(codex_kwargs)
-            elif not _aux_available and self.api_mode == "anthropic_messages":
-                # Native Anthropic — use the transport for kwargs
-                _tflush = self._get_transport()
-                ant_kwargs = _tflush.build_kwargs(
-                    model=self.model, messages=api_messages,
-                    tools=[memory_tool_def], max_tokens=5120,
-                    reasoning_config=None,
-                    preserve_dots=self._anthropic_preserve_dots(),
-                )
-                response = self._anthropic_messages_create(ant_kwargs)
-            elif not _aux_available:
-                api_kwargs = {
-                    "model": self.model,
-                    "messages": api_messages,
-                    "tools": [memory_tool_def],
-                    **self._max_tokens_param(5120),
-                }
-                if _flush_temperature is not None:
-                    api_kwargs["temperature"] = _flush_temperature
-                from agent.auxiliary_client import _get_task_timeout
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(
-                    **api_kwargs, timeout=_get_task_timeout("flush_memories")
-                )
-
-            # Extract tool calls from the response, handling all API formats
-            tool_calls = []
-            if self.api_mode == "codex_responses" and not _aux_available:
-                _ct_flush = self._get_transport()
-                _cnr_flush = _ct_flush.normalize_response(response)
-                if _cnr_flush and _cnr_flush.tool_calls:
-                    tool_calls = [
-                        SimpleNamespace(
-                            id=tc.id, type="function",
-                            function=SimpleNamespace(name=tc.name, arguments=tc.arguments),
-                        ) for tc in _cnr_flush.tool_calls
-                    ]
-            elif self.api_mode == "anthropic_messages" and not _aux_available:
-                _tfn = self._get_transport()
-                _flush_result = _tfn.normalize_response(response, strip_tool_prefix=self._is_anthropic_oauth)
-                if _flush_result and _flush_result.tool_calls:
-                    tool_calls = [
-                        SimpleNamespace(
-                            id=tc.id, type="function",
-                            function=SimpleNamespace(name=tc.name, arguments=tc.arguments),
-                        ) for tc in _flush_result.tool_calls
-                    ]
-            elif self.api_mode in ("chat_completions", "bedrock_converse"):
-                # chat_completions / bedrock — normalize through transport
-                _flush_result = self._get_transport().normalize_response(response)
-                if _flush_result.tool_calls:
-                    tool_calls = _flush_result.tool_calls
-            elif _aux_available and hasattr(response, "choices") and response.choices:
-                # Auxiliary client returned OpenAI-shaped response while main
-                # api_mode is codex/anthropic — extract tool_calls from .choices
-                _aux_msg = response.choices[0].message
-                if hasattr(_aux_msg, "tool_calls") and _aux_msg.tool_calls:
-                    tool_calls = _aux_msg.tool_calls
-
-            for tc in tool_calls:
-                if tc.function.name == "memory":
-                    try:
-                        args = json.loads(tc.function.arguments)
-                        flush_target = args.get("target", "memory")
-                        from tools.memory_tool import memory_tool as _memory_tool
-                        _memory_tool(
-                            action=args.get("action"),
-                            target=flush_target,
-                            content=args.get("content"),
-                            old_text=args.get("old_text"),
-                            store=self._memory_store,
-                        )
-                        if not self.quiet_mode:
-                            print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
-                    except Exception as e:
-                        logger.debug("Memory flush tool call failed: %s", e)
-        except Exception as e:
-            logger.debug("Memory flush API call failed: %s", e)
-        finally:
-            # Strip flush artifacts: remove everything from the flush message onward.
-            # Use sentinel marker instead of identity check for robustness.
-            while messages and messages[-1].get("_flush_sentinel") != _sentinel:
-                messages.pop()
-                if not messages:
-                    break
-            if messages and messages[-1].get("_flush_sentinel") == _sentinel:
-                messages.pop()
 
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
         """Compress conversation context and split the session in SQLite.
@@ -7776,8 +8070,6 @@ class AIAgent:
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
-        # Pre-compression memory flush: let the model save memories before they're lost
-        self.flush_memories(messages, min_turns=0)
 
         # Notify external memory provider before compression discards context
         if self._memory_manager:
@@ -7792,6 +8084,15 @@ class AIAgent:
             # Plugin context engine with strict signature that doesn't accept
             # focus_topic — fall back to calling without it.
             compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+
+        summary_error = getattr(self.context_compressor, "_last_summary_error", None)
+        if summary_error:
+            if getattr(self, "_last_compression_summary_warning", None) != summary_error:
+                self._last_compression_summary_warning = summary_error
+                self._emit_warning(
+                    f"⚠ Compression summary failed: {summary_error}. "
+                    "Inserted a fallback context marker."
+                )
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -7962,6 +8263,10 @@ class AIAgent:
                         function_args.get("action", ""),
                         target,
                         function_args.get("content", ""),
+                        metadata=self._build_memory_write_metadata(
+                            task_id=effective_task_id,
+                            tool_call_id=tool_call_id,
+                        ),
                     )
                 except Exception:
                     pass
@@ -8473,6 +8778,10 @@ class AIAgent:
                             function_args.get("action", ""),
                             target,
                             function_args.get("content", ""),
+                            metadata=self._build_memory_write_metadata(
+                                task_id=effective_task_id,
+                                tool_call_id=getattr(tool_call, "id", None),
+                            ),
                         )
                     except Exception:
                         pass
@@ -8717,6 +9026,7 @@ class AIAgent:
             api_messages = []
             for msg in messages:
                 api_msg = msg.copy()
+                self._copy_reasoning_content_for_api(msg, api_msg)
                 for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
                     api_msg.pop(internal_field, None)
                 if _needs_sanitize:
@@ -9346,6 +9656,19 @@ class AIAgent:
             # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
             # However, providers like Moonshot AI require a separate 'reasoning_content' field
             # on assistant messages with tool_calls. We handle both cases here.
+            request_logger = getattr(self, "logger", None) or logging.getLogger(__name__)
+            repaired_tool_calls = self._sanitize_tool_call_arguments(
+                messages,
+                logger=request_logger,
+                session_id=self.session_id,
+            )
+            if repaired_tool_calls > 0:
+                request_logger.info(
+                    "Sanitized %s corrupted tool_call arguments before request (session=%s)",
+                    repaired_tool_calls,
+                    self.session_id or "-",
+                )
+
             api_messages = []
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
@@ -11322,16 +11645,26 @@ class AIAgent:
                     interim_has_content = bool((interim_msg.get("content") or "").strip())
                     interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
                     interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
+                    interim_has_codex_message_items = bool(interim_msg.get("codex_message_items"))
 
-                    if interim_has_content or interim_has_reasoning or interim_has_codex_reasoning:
+                    if (
+                        interim_has_content
+                        or interim_has_reasoning
+                        or interim_has_codex_reasoning
+                        or interim_has_codex_message_items
+                    ):
                         last_msg = messages[-1] if messages else None
                         # Duplicate detection: two consecutive incomplete assistant
                         # messages with identical content AND reasoning are collapsed.
-                        # For reasoning-only messages (codex_reasoning_items differ but
-                        # visible content/reasoning are both empty), we also compare
-                        # the encrypted items to avoid silently dropping new state.
+                        # For provider-state-only changes (encrypted reasoning
+                        # items or replayable message ids/phases/statuses differ
+                        # while visible content/reasoning are unchanged), compare
+                        # those opaque payloads too so we don't silently drop the
+                        # newer continuation state.
                         last_codex_items = last_msg.get("codex_reasoning_items") if isinstance(last_msg, dict) else None
                         interim_codex_items = interim_msg.get("codex_reasoning_items")
+                        last_codex_message_items = last_msg.get("codex_message_items") if isinstance(last_msg, dict) else None
+                        interim_codex_message_items = interim_msg.get("codex_message_items")
                         duplicate_interim = (
                             isinstance(last_msg, dict)
                             and last_msg.get("role") == "assistant"
@@ -11339,6 +11672,7 @@ class AIAgent:
                             and (last_msg.get("content") or "") == (interim_msg.get("content") or "")
                             and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
                             and last_codex_items == interim_codex_items
+                            and last_codex_message_items == interim_codex_message_items
                         )
                         if not duplicate_interim:
                             messages.append(interim_msg)
@@ -12169,14 +12503,11 @@ class AIAgent:
             self._iters_since_skill = 0
 
         # External memory provider: sync the completed turn + queue next prefetch.
-        # Use original_user_message (clean input) — user_message may contain
-        # injected skill content that bloats / breaks provider queries.
-        if self._memory_manager and final_response and original_user_message:
-            try:
-                self._memory_manager.sync_all(original_user_message, final_response)
-                self._memory_manager.queue_prefetch_all(original_user_message)
-            except Exception:
-                pass
+        self._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=interrupted,
+        )
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.

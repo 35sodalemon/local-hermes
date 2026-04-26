@@ -356,6 +356,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=(),
         base_url_env_var="BEDROCK_BASE_URL",
     ),
+    "azure-foundry": ProviderConfig(
+        id="azure-foundry",
+        name="Azure Foundry",
+        auth_type="api_key",
+        inference_base_url="",  # User-provided endpoint
+        api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
+        base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+    ),
 }
 
 
@@ -743,7 +751,18 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
 
     try:
         raw = json.loads(auth_file.read_text())
-    except Exception:
+    except Exception as exc:
+        corrupt_path = auth_file.with_suffix(".json.corrupt")
+        try:
+            import shutil
+            shutil.copy2(auth_file, corrupt_path)
+        except Exception:
+            pass
+        logger.warning(
+            "auth: failed to parse %s (%s) — starting with empty store. "
+            "Corrupt file preserved at %s",
+            auth_file, exc, corrupt_path,
+        )
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     if isinstance(raw, dict) and (
