@@ -10173,7 +10173,7 @@ class HermesCLI:
             if cli_ref._approval_state:
                 return ""
             if cli_ref._clarify_freetext:
-                return "type your answer here and press Enter"
+                return "输入你的回答，按回车提交"
             if cli_ref._clarify_state:
                 return ""
             if cli_ref._command_running:
@@ -10181,9 +10181,9 @@ class HermesCLI:
                 status = cli_ref._command_status or "Processing command..."
                 return f"{frame} {status}"
             if cli_ref._agent_running:
-                return "msg=interrupt · /queue · /bg · /steer · Ctrl+C cancel"
+                return "发送消息打断 · /queue · /bg · /steer · Ctrl+C 取消"
             if cli_ref._voice_mode:
-                return "type or Ctrl+B to record"
+                return "输入文字或 Ctrl+B 录音"
             return ""
 
         input_area.control.input_processors.append(_PlaceholderProcessor(_get_placeholder))
