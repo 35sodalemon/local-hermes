@@ -62,6 +62,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                aliases=("reset",)),
     CommandDef("clear", "清屏并开始新会话", "会话",
                cli_only=True),
+    CommandDef("redraw", "强制重绘界面（修复终端显示偏移）", "会话",
+               cli_only=True),
     CommandDef("history", "查看对话历史", "会话",
                cli_only=True),
     CommandDef("save", "保存当前对话", "会话",
@@ -84,9 +86,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("deny", "拒绝待审危险命令", "会话",
                gateway_only=True),
     CommandDef("background", "后台运行提示", "会话",
-               aliases=("bg",), args_hint="<提示>"),
-    CommandDef("btw", "临时旁问（无工具，不存历史）", "会话",
-               args_hint="<问题>"),
+               aliases=("bg", "btw"), args_hint="<提示>"),
     CommandDef("agents", "显示活跃代理和运行中的任务", "会话",
                aliases=("tasks",)),
     CommandDef("queue", "排队提示，不打断当前对话", "会话",
@@ -128,8 +128,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("voice", "切换语音模式", "配置",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
     CommandDef("busy", "控制工作时 Enter 键的行为", "配置",
-               cli_only=True, args_hint="[queue|interrupt|status]",
-               subcommands=("queue", "interrupt", "status")),
+               cli_only=True, args_hint="[queue|steer|interrupt|status]",
+               subcommands=("queue", "steer", "interrupt", "status")),
 
     # 工具与技能
     CommandDef("tools", "管理工具（列表/启用/禁用）", "工具与技能",
@@ -806,6 +806,114 @@ def discord_skill_commands_by_category(
         uncategorized = uncategorized[:remaining_slots]
 
     return trimmed_categories, uncategorized, hidden
+
+
+# ---------------------------------------------------------------------------
+# Slack native slash commands
+# ---------------------------------------------------------------------------
+
+# Slack slash command name constraints: lowercase a-z, 0-9, hyphens,
+# underscores. Max 32 chars. Slack app manifest accepts up to 50 slash
+# commands per app.
+_SLACK_MAX_SLASH_COMMANDS = 50
+_SLACK_NAME_LIMIT = 32
+_SLACK_INVALID_CHARS = re.compile(r"[^a-z0-9_\-]")
+
+
+def _sanitize_slack_name(raw: str) -> str:
+    """Convert a command name to a valid Slack slash command name.
+
+    Slack allows lowercase a-z, digits, hyphens, and underscores. Max 32
+    chars. Uppercase is lowercased; invalid chars are stripped.
+    """
+    name = raw.lower()
+    name = _SLACK_INVALID_CHARS.sub("", name)
+    name = name.strip("-_")
+    return name[:_SLACK_NAME_LIMIT]
+
+
+def slack_native_slashes() -> list[tuple[str, str, str]]:
+    """Return (slash_name, description, usage_hint) triples for Slack.
+
+    Every gateway-available command in ``COMMAND_REGISTRY`` is surfaced as
+    a standalone Slack slash command (e.g. ``/btw``, ``/stop``, ``/model``),
+    matching Discord's and Telegram's model where every command is a
+    first-class slash and not a ``/hermes <verb>`` subcommand.
+
+    Both canonical names and aliases are included so users can type any
+    documented form (e.g. ``/background``, ``/bg``, and ``/btw`` all work).
+    Plugin-registered slash commands are included too.
+
+    Results are clamped to Slack's 50-command limit with duplicate-name
+    avoidance. ``/hermes`` is always reserved as the first entry so the
+    legacy ``/hermes <subcommand>`` form keeps working for anything that
+    gets dropped by the clamp or for free-form questions.
+    """
+    overrides = _resolve_config_gates()
+    entries: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    # Reserve /hermes as the catch-all top-level command.
+    entries.append(("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]"))
+    seen.add("hermes")
+
+    def _add(name: str, desc: str, hint: str) -> None:
+        slack_name = _sanitize_slack_name(name)
+        if not slack_name or slack_name in seen:
+            return
+        if len(entries) >= _SLACK_MAX_SLASH_COMMANDS:
+            return
+        # Slack description cap is 2000 chars; keep it short.
+        entries.append((slack_name, desc[:140], hint[:100]))
+        seen.add(slack_name)
+
+    # First pass: canonical names (so they win slots if we hit the cap).
+    for cmd in COMMAND_REGISTRY:
+        if not _is_gateway_available(cmd, overrides):
+            continue
+        _add(cmd.name, cmd.description, cmd.args_hint or "")
+
+    # Second pass: aliases.
+    for cmd in COMMAND_REGISTRY:
+        if not _is_gateway_available(cmd, overrides):
+            continue
+        for alias in cmd.aliases:
+            # Skip aliases that only differ from canonical by case/punctuation
+            # normalization (already covered by _add dedup).
+            _add(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
+
+    # Third pass: plugin commands.
+    for name, description, args_hint in _iter_plugin_command_entries():
+        _add(name, description, args_hint or "")
+
+    return entries
+
+
+def slack_app_manifest(request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
+    """Generate a Slack app manifest with all gateway commands as slashes.
+
+    ``request_url`` is required by Slack's manifest schema for every slash
+    command, but in Socket Mode (which we use) Slack ignores it and routes
+    the command event through the WebSocket. A placeholder URL is fine.
+
+    The returned dict is the ``features.slash_commands`` portion only —
+    callers compose it into a full manifest (or merge into an existing
+    one). Keeping it narrow avoids coupling us to the rest of the manifest
+    schema (display_information, oauth_config, settings, etc.) which users
+    set up once in the Slack UI and rarely change.
+    """
+    slashes = []
+    for name, desc, usage in slack_native_slashes():
+        entry = {
+            "command": f"/{name}",
+            "description": desc or f"Run /{name}",
+            "should_escape": False,
+            "url": request_url,
+        }
+        if usage:
+            entry["usage_hint"] = usage
+        slashes.append(entry)
+    return {"features": {"slash_commands": slashes}}
 
 
 def slack_subcommand_map() -> dict[str, str]:
