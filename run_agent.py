@@ -41,12 +41,47 @@ import urllib.request
 import uuid
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
-from openai import OpenAI
+# NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
+# SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
+# that imports the SDK on first call/isinstance check. This preserves:
+#   (a) the single in-module `OpenAI(**client_kwargs)` call site at
+#       _create_openai_client, and
+#   (b) `patch("run_agent.OpenAI", ...)` test patterns used by ~28 test files.
 import fire
 from datetime import datetime
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
+
+
+_OPENAI_CLS_CACHE: Optional[type] = None
+
+
+def _load_openai_cls() -> type:
+    """Import and cache ``openai.OpenAI``."""
+    global _OPENAI_CLS_CACHE
+    if _OPENAI_CLS_CACHE is None:
+        from openai import OpenAI as _cls
+        _OPENAI_CLS_CACHE = _cls
+    return _OPENAI_CLS_CACHE
+
+
+class _OpenAIProxy:
+    """Module-level proxy that looks like ``openai.OpenAI`` but imports lazily."""
+
+    __slots__ = ()
+
+    def __call__(self, *args, **kwargs):
+        return _load_openai_cls()(*args, **kwargs)
+
+    def __instancecheck__(self, obj):
+        return isinstance(obj, _load_openai_cls())
+
+    def __repr__(self):
+        return "<lazy openai.OpenAI proxy>"
+
+
+OpenAI = _OpenAIProxy()
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
@@ -86,7 +121,7 @@ from tools.browser_tool import cleanup_browser
 
 
 # Agent internals extracted to agent/ package for modularity
-from agent.memory_manager import build_memory_context_block, sanitize_context
+from agent.memory_manager import StreamingContextScrubber, build_memory_context_block, sanitize_context
 from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
@@ -125,6 +160,7 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
+from hermes_cli.config import cfg_get
 
 
 
@@ -1218,6 +1254,10 @@ class AIAgent:
         # Deferred paragraph break flag — set after tool iterations so a
         # single "\n\n" is prepended to the next real text delta.
         self._stream_needs_break = False
+        # Stateful scrubber for <memory-context> spans split across stream
+        # deltas (#5719).  sanitize_context() alone can't survive chunk
+        # boundaries because the block regex needs both tags in one string.
+        self._stream_context_scrubber = StreamingContextScrubber()
         # Visible assistant text already delivered through live token callbacks
         # during the current model response. Used to avoid re-sending the same
         # commentary when the provider later returns it as a completed interim
@@ -1291,9 +1331,9 @@ class AIAgent:
                 self.client = None
                 self._client_kwargs = {}
                 if not self.quiet_mode:
-                    print(f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)")
+                    print(f"🤖 AI Agent 已初始化，模型：{self.model}（Anthropic 原生）")
                     if effective_key and len(effective_key) > 12:
-                        print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+                        print(f"🔑 使用令牌：{effective_key[:8]}...{effective_key[-4:]}")
         elif self.api_mode == "bedrock_converse":
             # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
             # Region is extracted from the base_url or defaults to us-east-1.
@@ -1436,13 +1476,13 @@ class AIAgent:
             try:
                 self.client = self._create_openai_client(client_kwargs, reason="agent_init", shared=True)
                 if not self.quiet_mode:
-                    print(f"🤖 AI Agent initialized with model: {self.model}")
+                    print(f"🤖 AI Agent 已初始化，模型：{self.model}")
                     if base_url:
-                        print(f"🔗 Using custom base URL: {base_url}")
+                        print(f"🔗 使用自定义 base URL：{base_url}")
                     # Always show API key info (masked) for debugging auth issues
                     key_used = client_kwargs.get("api_key", "none")
                     if key_used and key_used != "dummy-key" and len(key_used) > 12:
-                        print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
+                        print(f"🔑 使用 API key：{key_used[:8]}...{key_used[-4:]}")
                     else:
                         print(f"⚠️  警告：API 密钥似乎无效或缺失（已获取：'{key_used[:20] if key_used else 'none'}...'）")
             except Exception as e:
@@ -1468,9 +1508,9 @@ class AIAgent:
         if self._fallback_chain and not self.quiet_mode:
             if len(self._fallback_chain) == 1:
                 fb = self._fallback_chain[0]
-                print(f"🔄 Fallback model: {fb['model']} ({fb['provider']})")
+                print(f"🔄 备用模型：{fb['model']} ({fb['provider']})")
             else:
-                print(f"🔄 Fallback chain ({len(self._fallback_chain)} providers): " +
+                print(f"🔄 备用链（{len(self._fallback_chain)} 个供应商）：" +
                       " → ".join(f"{f['model']} ({f['provider']})" for f in self._fallback_chain))
 
         # Get available tools with filtering
@@ -1486,15 +1526,15 @@ class AIAgent:
             self.valid_tool_names = {tool["function"]["name"] for tool in self.tools}
             tool_names = sorted(self.valid_tool_names)
             if not self.quiet_mode:
-                print(f"🛠️  Loaded {len(self.tools)} tools: {', '.join(tool_names)}")
+                print(f"🛠️  已加载 {len(self.tools)} 个工具：{', '.join(tool_names)}")
                 
                 # Show filtering info if applied
                 if enabled_toolsets:
-                    print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
+                    print(f"   ✅ 已启用的工具集：{', '.join(enabled_toolsets)}")
                 if disabled_toolsets:
                     print(f"   ❌ 已禁用的工具集：{', '.join(disabled_toolsets)}")
         elif not self.quiet_mode:
-            print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+            print("🛠️  未加载任何工具（全部被过滤或不可用）")
         
         # Check tool requirements
         if self.tools and not self.quiet_mode:
@@ -1505,12 +1545,12 @@ class AIAgent:
         
         # Show trajectory saving status
         if self.save_trajectories and not self.quiet_mode:
-            print("📝 Trajectory saving enabled")
+            print("📝 轨迹保存已启用")
         
         # Show ephemeral system prompt status
         if self.ephemeral_system_prompt and not self.quiet_mode:
             prompt_preview = self.ephemeral_system_prompt[:60] + "..." if len(self.ephemeral_system_prompt) > 60 else self.ephemeral_system_prompt
-            print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
+            print(f"🔒 临时系统提示：'{prompt_preview}'（不保存到轨迹中）")
         
         # Show prompt caching status
         if self._use_prompt_caching and not self.quiet_mode:
@@ -1520,7 +1560,7 @@ class AIAgent:
                 source = "Anthropic-compatible endpoint"
             else:
                 source = "Claude via OpenRouter"
-            print(f"💾 Prompt caching: ENABLED ({source}, {self._cache_ttl} TTL)")
+            print(f"💾 Prompt 缓存：已启用（{source}，{self._cache_ttl} TTL）")
         
         # Session logging setup - auto-save conversation trajectories for debugging
         self.session_start = datetime.now()
@@ -1749,7 +1789,7 @@ class AIAgent:
         # compression model. Custom endpoints often cannot report this via
         # /models, so the startup feasibility check needs the config hint.
         try:
-            _aux_cfg = _agent_cfg.get("auxiliary", {}).get("compression", {})
+            _aux_cfg = cfg_get(_agent_cfg, "auxiliary", "compression", default={})
         except Exception:
             _aux_cfg = {}
         if isinstance(_aux_cfg, dict):
@@ -1786,9 +1826,6 @@ class AIAgent:
                     file=sys.stderr,
                 )
                 _config_context_length = None
-
-        # Store for reuse in switch_model (so config override persists across model switches)
-        self._config_context_length = _config_context_length
 
         # Resolve custom_providers list once for reuse below (startup
         # context-length override and plugin context-engine init).
@@ -1848,7 +1885,14 @@ class AIAgent:
                                             file=sys.stderr,
                                         )
                         break
-        
+
+        # Persist for reuse on switch_model / fallback activation. Must come
+        # AFTER the custom_providers branch so per-model overrides aren't lost.
+        self._config_context_length = _config_context_length
+
+        self._ensure_lmstudio_runtime_loaded(_config_context_length)
+
+
         # Select context engine: config-driven (like memory providers).
         # 1. Check config.yaml context.engine setting
         # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
@@ -2090,6 +2134,39 @@ class AIAgent:
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.on_session_reset()
     
+    def _ensure_lmstudio_runtime_loaded(self, config_context_length: Optional[int] = None) -> None:
+        """
+        Preload the LM Studio model with at least Hermes' minimum context.
+        """
+        if (self.provider or "").strip().lower() != "lmstudio":
+            return
+        try:
+            from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+            from hermes_cli.models import ensure_lmstudio_model_loaded
+            if config_context_length is None:
+                config_context_length = getattr(self, "_config_context_length", None)
+            target_ctx = max(config_context_length or 0, MINIMUM_CONTEXT_LENGTH)
+            loaded_ctx = ensure_lmstudio_model_loaded(
+                self.model, self.base_url, getattr(self, "api_key", ""), target_ctx,
+            )
+            if loaded_ctx:
+                # Push into the live compressor so the status bar reflects the
+                # real loaded ctx the moment the load resolves, instead of
+                # holding the previous model's value (or "ctx --") through the
+                # next render tick.
+                cc = getattr(self, "context_compressor", None)
+                if cc is not None:
+                    cc.update_model(
+                        model=self.model,
+                        context_length=loaded_ctx,
+                        base_url=self.base_url,
+                        api_key=getattr(self, "api_key", ""),
+                        provider=self.provider,
+                        api_mode=self.api_mode,
+                    )
+        except Exception as err:
+            logger.debug("LM Studio preload skipped: %s", err)
+
     def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
         """Switch the model/provider in-place for a live agent.
 
@@ -2184,6 +2261,9 @@ class AIAgent:
                 model=new_model,
             )
         )
+
+        # ── LM Studio: preload before probing context length ──
+        self._ensure_lmstudio_runtime_loaded()
 
         # ── Update context compressor ──
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -2423,7 +2503,10 @@ class AIAgent:
         if not self.compression_enabled:
             return
         try:
-            from agent.auxiliary_client import get_text_auxiliary_client
+            from agent.auxiliary_client import (
+                _resolve_task_provider_model,
+                get_text_auxiliary_client,
+            )
             from agent.model_metadata import (
                 MINIMUM_CONTEXT_LENGTH,
                 get_model_context_length,
@@ -2433,6 +2516,14 @@ class AIAgent:
                 "compression",
                 main_runtime=self._current_main_runtime(),
             )
+            # Best-effort aux provider label for the warning message. The
+            # configured provider may be "auto", in which case we fall back
+            # to the client's base_url hostname so the user can still tell
+            # where the compression model is actually being called.
+            try:
+                _aux_cfg_provider, _, _, _, _ = _resolve_task_provider_model("compression")
+            except Exception:
+                _aux_cfg_provider = ""
             if client is None or not aux_model:
                 msg = (
                     "⚠ No auxiliary LLM provider configured — context "
@@ -2499,10 +2590,37 @@ class AIAgent:
                         new_threshold / main_ctx
                     )
                 safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
+                # Build human-readable "model (provider)" labels for both
+                # the main model and the compression model so users can
+                # tell at a glance which provider each side is actually
+                # using. When the configured provider is empty or "auto",
+                # fall back to the client's base_url hostname.
+                _main_model = getattr(self, "model", "") or "?"
+                _main_provider = getattr(self, "provider", "") or ""
+                _aux_provider_label = (
+                    _aux_cfg_provider
+                    if _aux_cfg_provider and _aux_cfg_provider != "auto"
+                    else ""
+                )
+                if not _aux_provider_label:
+                    try:
+                        from urllib.parse import urlparse
+                        _aux_provider_label = (
+                            urlparse(aux_base_url).hostname or aux_base_url
+                        )
+                    except Exception:
+                        _aux_provider_label = aux_base_url or "auto"
+                _main_label = (
+                    f"{_main_model} ({_main_provider})"
+                    if _main_provider
+                    else _main_model
+                )
+                _aux_label = f"{aux_model} ({_aux_provider_label})"
                 msg = (
-                    f"⚠ Compression model ({aux_model}) context is "
-                    f"{aux_context:,} tokens, but the main model's "
-                    f"compression threshold was {old_threshold:,} tokens. "
+                    f"⚠ Compression model {_aux_label} context is "
+                    f"{aux_context:,} tokens, but the main model "
+                    f"{_main_label}'s compression threshold was "
+                    f"{old_threshold:,} tokens. "
                     f"Auto-lowered this session's threshold to "
                     f"{new_threshold:,} tokens so compression can run.\n"
                     f"  To make this permanent, edit config.yaml — either:\n"
@@ -2678,7 +2796,6 @@ class AIAgent:
         eff_api_mode = api_mode if api_mode is not None else (self.api_mode or "")
         eff_model = (model if model is not None else self.model) or ""
 
-        base_lower = eff_base_url.lower()
         model_lower = eff_model.lower()
         provider_lower = eff_provider.lower()
         is_claude = "claude" in model_lower
@@ -2696,6 +2813,24 @@ class AIAgent:
         if is_anthropic_wire and is_claude:
             # Third-party Anthropic-compatible gateway.
             return True, True
+
+        # MiniMax on its Anthropic-compatible endpoint serves its own
+        # model family (MiniMax-M2.7, M2.5, M2.1, M2) with documented
+        # cache_control support (0.1× read pricing, 5-minute TTL).  The
+        # blanket is_claude gate above excludes these — opt them in
+        # explicitly via provider id or host match so users on
+        # provider=minimax / minimax-cn (or custom endpoints pointing at
+        # api.minimax.io/anthropic / api.minimaxi.com/anthropic) get the
+        # same cost reduction as Claude traffic.
+        # Docs: https://platform.minimax.io/docs/api-reference/anthropic-api-compatible-cache
+        if is_anthropic_wire:
+            is_minimax_provider = provider_lower in {"minimax", "minimax-cn"}
+            is_minimax_host = (
+                base_url_host_matches(eff_base_url, "api.minimax.io")
+                or base_url_host_matches(eff_base_url, "api.minimaxi.com")
+            )
+            if is_minimax_provider or is_minimax_host:
+                return True, True
 
         # Qwen/Alibaba on OpenCode (Zen/Go) and native DashScope: OpenAI-wire
         # transport that accepts Anthropic-style cache_control markers and
@@ -3114,49 +3249,135 @@ class AIAgent:
     )
 
     _SKILL_REVIEW_PROMPT = (
-        "Review the conversation above and consider whether a skill should be saved or updated.\n\n"
-        "Work in this order — do not skip steps:\n\n"
-        "1. SURVEY the existing skill landscape first. Call skills_list to see what you "
-        "have. If anything looks potentially relevant, skill_view it before deciding. "
-        "You are looking for the CLASS of task that just happened, not the exact task. "
-        "Example: a successful Tauri build is in the class \"desktop app build "
-        "troubleshooting\", not \"fix my specific Tauri error today\".\n\n"
-        "2. THINK CLASS-FIRST. What general pattern of task did the user just complete? "
-        "What conditions will trigger this pattern again? Describe the class in one "
-        "sentence before looking at what to save.\n\n"
-        "3. PREFER GENERALIZING AN EXISTING SKILL over creating a new one. If a skill "
-        "already covers the class — even partially — update it (skill_manage patch) "
-        "with the new insight. Broaden its \"when to use\" trigger if needed.\n\n"
-        "4. ONLY CREATE A NEW SKILL when no existing skill reasonably covers the class. "
-        "When you create one, name and scope it at the class level "
-        "(\"react-i18n-setup\", not \"add-i18n-to-my-dashboard-app\"). The trigger "
-        "section must describe the class of situations, not this one session.\n\n"
-        "5. If you notice two existing skills that overlap, note it in your response "
-        "so a future review can consolidate them. Do not consolidate now unless the "
-        "overlap is obvious and low-risk.\n\n"
-        "Only act when something is genuinely worth saving. "
-        "If nothing stands out, just say 'Nothing to save.' and stop."
+        "Review the conversation above and update the skill library. Be "
+        "ACTIVE — most sessions produce at least one skill update, even if "
+        "small. A pass that does nothing is a missed learning opportunity, "
+        "not a neutral outcome.\n\n"
+        "Target shape of the library: CLASS-LEVEL skills, each with a rich "
+        "SKILL.md and a `references/` directory for session-specific detail. "
+        "Not a long flat list of narrow one-session-one-skill entries. This "
+        "shapes HOW you update, not WHETHER you update.\n\n"
+        "Signals to look for (any one of these warrants action):\n"
+        "  • User corrected your style, tone, format, legibility, or "
+        "verbosity. Frustration signals like 'stop doing X', 'this is too "
+        "verbose', 'don't format like this', 'why are you explaining', "
+        "'just give me the answer', 'you always do Y and I hate it', or an "
+        "explicit 'remember this' are FIRST-CLASS skill signals, not just "
+        "memory signals. Update the relevant skill(s) to embed the "
+        "preference so the next session starts already knowing.\n"
+        "  • User corrected your workflow, approach, or sequence of steps. "
+        "Encode the correction as a pitfall or explicit step in the skill "
+        "that governs that class of task.\n"
+        "  • Non-trivial technique, fix, workaround, debugging path, or "
+        "tool-usage pattern emerged that a future session would benefit "
+        "from. Capture it.\n"
+        "  • A skill that got loaded or consulted this session turned out "
+        "to be wrong, missing a step, or outdated. Patch it NOW.\n\n"
+        "Preference order — prefer the earliest action that fits, but do "
+        "pick one when a signal above fired:\n"
+        "  1. UPDATE A CURRENTLY-LOADED SKILL. Look back through the "
+        "conversation for skills the user loaded via /skill-name or you "
+        "read via skill_view. If any of them covers the territory of the "
+        "new learning, PATCH that one first. It is the skill that was in "
+        "play, so it's the right one to extend.\n"
+        "  2. UPDATE AN EXISTING UMBRELLA (via skills_list + skill_view). "
+        "If no loaded skill fits but an existing class-level skill does, "
+        "patch it. Add a subsection, a pitfall, or broaden a trigger.\n"
+        "  3. ADD A SUPPORT FILE under an existing umbrella. Skills can be "
+        "packaged with three kinds of support files — use the right "
+        "directory per kind:\n"
+        "     • `references/<topic>.md` — session-specific detail (error "
+        "transcripts, reproduction recipes, provider quirks) AND "
+        "condensed knowledge banks: quoted research, API docs, external "
+        "authoritative excerpts, or domain notes you found while working "
+        "on the problem. Write it concise and for the value of the task, "
+        "not as a full mirror of upstream docs.\n"
+        "     • `templates/<name>.<ext>` — starter files meant to be "
+        "copied and modified (boilerplate configs, scaffolding, a "
+        "known-good example the agent can `reproduce with modifications`).\n"
+        "     • `scripts/<name>.<ext>` — statically re-runnable actions "
+        "the skill can invoke directly (verification scripts, fixture "
+        "generators, deterministic probes, anything the agent should run "
+        "rather than hand-type each time).\n"
+        "     Add support files via skill_manage action=write_file with "
+        "file_path starting 'references/', 'templates/', or 'scripts/'. "
+        "The umbrella's SKILL.md should gain a one-line pointer to any "
+        "new support file so future agents know it exists.\n"
+        "  4. CREATE A NEW CLASS-LEVEL UMBRELLA SKILL when no existing "
+        "skill covers the class. The name MUST be at the class level. "
+        "The name MUST NOT be a specific PR number, error string, feature "
+        "codename, library-alone name, or 'fix-X / debug-Y / audit-Z-today' "
+        "session artifact. If the proposed name only makes sense for "
+        "today's task, it's wrong — fall back to (1), (2), or (3).\n\n"
+        "User-preference embedding (important): when the user expressed a "
+        "style/format/workflow preference, the update belongs in the "
+        "SKILL.md body, not just in memory. Memory captures 'who the user "
+        "is and what the current situation and state of your operations "
+        "are'; skills capture 'how to do this class of task for this "
+        "user'. When they complain about how you handled a task, the "
+        "skill that governs that task needs to carry the lesson.\n\n"
+        "If you notice two existing skills that overlap, note it in your "
+        "reply — the background curator handles consolidation at scale.\n\n"
+        "'Nothing to save.' is a real option but should NOT be the "
+        "default. If the session ran smoothly with no corrections and "
+        "produced no new technique, just say 'Nothing to save.' and stop. "
+        "Otherwise, act."
     )
 
     _COMBINED_REVIEW_PROMPT = (
-        "Review the conversation above and consider two things:\n\n"
-        "**Memory**: Has the user revealed things about themselves — their persona, "
-        "desires, preferences, or personal details? Has the user expressed expectations "
-        "about how you should behave, their work style, or ways they want you to operate? "
-        "If so, save using the memory tool.\n\n"
-        "**Skills**: Was a non-trivial approach used to complete a task that required trial "
-        "and error, changing course due to experiential findings, or a different method "
-        "or outcome than the user expected? If so, work in this order:\n"
-        "  a. SURVEY existing skills first (skills_list, then skill_view on candidates).\n"
-        "  b. Identify the CLASS of task, not the specific task "
-        "(\"desktop app build troubleshooting\", not \"fix my Tauri error\").\n"
-        "  c. PREFER UPDATING/GENERALIZING an existing skill that covers the class.\n"
-        "  d. ONLY CREATE A NEW SKILL if no existing one covers the class. Scope at "
-        "the class level, not this one session.\n"
-        "  e. If you notice overlapping skills during the survey, note it so a future "
-        "review can consolidate them.\n\n"
-        "Only act if there's something genuinely worth saving. "
-        "If nothing stands out, just say 'Nothing to save.' and stop."
+        "Review the conversation above and update two things:\n\n"
+        "**Memory**: who the user is. Did the user reveal persona, "
+        "desires, preferences, personal details, or expectations about "
+        "how you should behave? Save facts about the user and durable "
+        "preferences with the memory tool.\n\n"
+        "**Skills**: how to do this class of task. Be ACTIVE — most "
+        "sessions produce at least one skill update. A pass that does "
+        "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
+        "Target shape of the skill library: CLASS-LEVEL skills with a rich "
+        "SKILL.md and a `references/` directory for session-specific detail. "
+        "Not a long flat list of narrow one-session-one-skill entries.\n\n"
+        "Signals that warrant a skill update (any one is enough):\n"
+        "  • User corrected your style, tone, format, legibility, "
+        "verbosity, or approach. Frustration is a FIRST-CLASS skill "
+        "signal, not just a memory signal. 'stop doing X', 'don't format "
+        "like this', 'I hate when you Y' — embed the lesson in the skill "
+        "that governs that task so the next session starts fixed.\n"
+        "  • Non-trivial technique, fix, workaround, or debugging path "
+        "emerged.\n"
+        "  • A skill that was loaded or consulted turned out wrong, "
+        "missing, or outdated — patch it now.\n\n"
+        "Preference order for skills — pick the earliest that fits:\n"
+        "  1. UPDATE A CURRENTLY-LOADED SKILL. Check what skills were "
+        "loaded via /skill-name or skill_view in the conversation. If one "
+        "of them covers the learning, PATCH it first. It was in play; "
+        "it's the right place.\n"
+        "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to "
+        "find the right one). Patch it.\n"
+        "  3. ADD A SUPPORT FILE under an existing umbrella via "
+        "skill_manage action=write_file. Three kinds: "
+        "`references/<topic>.md` for session-specific detail OR condensed "
+        "knowledge banks (quoted research, API docs excerpts, domain "
+        "notes) written concise and task-focused; `templates/<name>.<ext>` "
+        "for starter files meant to be copied and modified; "
+        "`scripts/<name>.<ext>` for statically re-runnable actions "
+        "(verification, fixture generators, probes). Add a one-line "
+        "pointer in SKILL.md so future agents find them.\n"
+        "  4. CREATE A NEW CLASS-LEVEL UMBRELLA when nothing exists. "
+        "Name at the class level — NOT a PR number, error string, "
+        "codename, library-alone name, or 'fix-X / debug-Y' session "
+        "artifact. If the name only fits today's task, fall back to (1), "
+        "(2), or (3).\n\n"
+        "User-preference embedding: when the user complains about how "
+        "you handled a task, update the skill that governs that task — "
+        "memory alone isn't enough. Memory says 'who the user is and "
+        "what the current situation and state of your operations are'; "
+        "skills say 'how to do this class of task for this user'. Both "
+        "should carry user-preference lessons when relevant.\n\n"
+        "If you notice overlapping existing skills, mention it — the "
+        "background curator handles consolidation.\n\n"
+        "Act on whichever of the two dimensions has real signal. If "
+        "genuinely nothing stands out on either, say 'Nothing to save.' "
+        "and stop — but don't reach for that conclusion as a default."
     )
 
     @staticmethod
@@ -4358,8 +4579,14 @@ class AIAgent:
         if not (self._memory_manager and final_response and original_user_message):
             return
         try:
-            self._memory_manager.sync_all(original_user_message, final_response)
-            self._memory_manager.queue_prefetch_all(original_user_message)
+            self._memory_manager.sync_all(
+                original_user_message, final_response,
+                session_id=self.session_id or "",
+            )
+            self._memory_manager.queue_prefetch_all(
+                original_user_message,
+                session_id=self.session_id or "",
+            )
         except Exception:
             pass
 
@@ -4766,6 +4993,145 @@ class AIAgent:
         return messages
 
     @staticmethod
+    def _is_thinking_only_assistant(msg: Dict[str, Any]) -> bool:
+        """Return True if ``msg`` is an assistant turn whose only payload is reasoning.
+
+        "Thinking-only" means the model emitted reasoning (``reasoning`` or
+        ``reasoning_content``) but no visible text and no tool_calls. When sent
+        back to providers that convert reasoning into thinking blocks (native
+        Anthropic, OpenRouter Anthropic, third-party Anthropic-compatible
+        gateways), the resulting message has only thinking blocks — which
+        Anthropic rejects with HTTP 400 "The final block in an assistant
+        message cannot be `thinking`."
+
+        Symmetric with Claude Code's ``filterOrphanedThinkingOnlyMessages``
+        (src/utils/messages.ts). We drop the whole turn from the API copy
+        rather than fabricating stub text — the message log (UI transcript)
+        keeps the reasoning block; only the wire copy is cleaned.
+        """
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            return False
+        if msg.get("tool_calls"):
+            return False
+        # Does it have any actual output?
+        content = msg.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return False
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    if block:  # non-empty non-dict string etc.
+                        return False
+                    continue
+                btype = block.get("type")
+                if btype in ("thinking", "redacted_thinking"):
+                    continue
+                if btype == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        return False
+                    continue
+                # tool_use, image, document, etc. — real payload
+                return False
+        elif content is not None and content != "":
+            return False
+        # Content is empty-ish. Is there reasoning to make it thinking-only?
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return True
+        # reasoning_details list form
+        rd = msg.get("reasoning_details")
+        if isinstance(rd, list) and rd:
+            return True
+        return False
+
+    @staticmethod
+    def _drop_thinking_only_and_merge_users(
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Drop thinking-only assistant turns; merge any adjacent user messages left behind.
+
+        Runs on the per-call ``api_messages`` copy only. The stored
+        conversation history (``self.messages``) is never mutated, so the
+        user still sees the thinking block in the CLI/gateway transcript and
+        session persistence keeps the full trace. Only the wire copy sent to
+        the provider is cleaned.
+
+        Why drop-and-merge rather than inject stub text:
+        - Fabricating ``"."`` / ``"(continued)"`` text lies in the history
+          and makes future turns see model output the model didn't emit.
+        - Dropping the turn preserves honesty; merging adjacent user messages
+          preserves the provider's role-alternation invariant.
+        - This is the pattern used by Claude Code's ``normalizeMessagesForAPI``
+          (filterOrphanedThinkingOnlyMessages + mergeAdjacentUserMessages).
+        """
+        if not messages:
+            return messages
+
+        # Pass 1: drop thinking-only assistant turns.
+        kept = [m for m in messages if not AIAgent._is_thinking_only_assistant(m)]
+        dropped = len(messages) - len(kept)
+        if dropped == 0:
+            return messages
+
+        # Pass 2: merge any newly-adjacent user messages.
+        merged: List[Dict[str, Any]] = []
+        merges = 0
+        for m in kept:
+            prev = merged[-1] if merged else None
+            if (
+                prev is not None
+                and prev.get("role") == "user"
+                and m.get("role") == "user"
+            ):
+                prev_content = prev.get("content", "")
+                cur_content = m.get("content", "")
+                # Work on a copy of ``prev`` so the caller's input dicts are
+                # never mutated. ``_sanitize_api_messages`` upstream already
+                # hands us per-call copies, but staying pure here means we
+                # can be called safely from anywhere (tests, other loops).
+                prev_copy = dict(prev)
+                # Only string-content merge is meaningful for role-alternation
+                # purposes. If either side is a list (multimodal), append as a
+                # separate block rather than collapsing.
+                if isinstance(prev_content, str) and isinstance(cur_content, str):
+                    sep = "\n\n" if prev_content and cur_content else ""
+                    prev_copy["content"] = prev_content + sep + cur_content
+                elif isinstance(prev_content, list) and isinstance(cur_content, list):
+                    prev_copy["content"] = list(prev_content) + list(cur_content)
+                elif isinstance(prev_content, list) and isinstance(cur_content, str):
+                    if cur_content:
+                        prev_copy["content"] = list(prev_content) + [
+                            {"type": "text", "text": cur_content}
+                        ]
+                    else:
+                        prev_copy["content"] = list(prev_content)
+                elif isinstance(prev_content, str) and isinstance(cur_content, list):
+                    new_blocks: List[Dict[str, Any]] = []
+                    if prev_content:
+                        new_blocks.append({"type": "text", "text": prev_content})
+                    new_blocks.extend(cur_content)
+                    prev_copy["content"] = new_blocks
+                else:
+                    # Unknown content shape — fall back to appending separately
+                    # (violates alternation, but safer than raising in a hot path).
+                    merged.append(m)
+                    continue
+                merged[-1] = prev_copy
+                merges += 1
+            else:
+                merged.append(m)
+
+        logger.debug(
+            "Pre-call sanitizer: dropped %d thinking-only assistant turn(s), "
+            "merged %d adjacent user message(s)",
+            dropped,
+            merges,
+        )
+        return merged
+
+    @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
         """Truncate excess delegate_task calls to max_concurrent_children.
 
@@ -5077,6 +5443,8 @@ class AIAgent:
             keepalive_http = self._build_keepalive_http_client(client_kwargs.get("base_url", ""))
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
+        # Uses the module-level `OpenAI` name, resolved lazily on first
+        # access via __getattr__ below. Tests patch via `run_agent.OpenAI`.
         client = OpenAI(**client_kwargs)
         logger.info(
             "OpenAI client created (%s, shared=%s) %s",
@@ -5272,7 +5640,39 @@ class AIAgent:
             logger.debug("Dead connection check error: %s", exc)
         return False
 
-    def _create_request_openai_client(self, *, reason: str) -> Any:
+    @staticmethod
+    def _api_kwargs_have_image_parts(api_kwargs: dict) -> bool:
+        """Return True when the outbound request still contains native image parts."""
+        if not isinstance(api_kwargs, dict):
+            return False
+        candidates = []
+        messages = api_kwargs.get("messages")
+        if isinstance(messages, list):
+            candidates.extend(messages)
+        # Responses API payloads use `input`; after conversion, image parts can
+        # still be present there instead of in `messages`.
+        response_input = api_kwargs.get("input")
+        if isinstance(response_input, list):
+            candidates.extend(response_input)
+
+        def _contains_image(value: Any) -> bool:
+            if isinstance(value, dict):
+                ptype = value.get("type")
+                if ptype in {"image_url", "input_image"}:
+                    return True
+                return any(_contains_image(v) for v in value.values())
+            if isinstance(value, list):
+                return any(_contains_image(v) for v in value)
+            return False
+
+        return any(_contains_image(item) for item in candidates)
+
+    def _copilot_headers_for_request(self, *, is_vision: bool) -> dict:
+        from hermes_cli.copilot_auth import copilot_request_headers
+
+        return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
+
+    def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
 
         primary_client = self._ensure_primary_openai_client(reason=reason)
@@ -5280,6 +5680,11 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
+        if (
+            base_url_host_matches(str(request_kwargs.get("base_url", "")), "api.githubcopilot.com")
+            and self._api_kwargs_have_image_parts(api_kwargs or {})
+        ):
+            request_kwargs["default_headers"] = self._copilot_headers_for_request(is_vision=True)
         return self._create_openai_client(request_kwargs, reason=reason, shared=False)
 
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
@@ -5822,7 +6227,10 @@ class AIAgent:
         def _call():
             try:
                 if self.api_mode == "codex_responses":
-                    request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
+                    request_client_holder["client"] = self._create_request_openai_client(
+                        reason="codex_stream_request",
+                        api_kwargs=api_kwargs,
+                    )
                     result["response"] = self._run_codex_stream(
                         api_kwargs,
                         client=request_client_holder["client"],
@@ -5854,7 +6262,10 @@ class AIAgent:
                         raise
                     result["response"] = normalize_converse_response(raw_response)
                 else:
-                    request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
+                    request_client_holder["client"] = self._create_request_openai_client(
+                        reason="chat_completion_request",
+                        api_kwargs=api_kwargs,
+                    )
                     result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
             except Exception as e:
                 result["error"] = e
@@ -5952,6 +6363,20 @@ class AIAgent:
 
     def _reset_stream_delivery_tracking(self) -> None:
         """Reset tracking for text delivered during the current model response."""
+        # Flush any benign partial-tag tail held by the context scrubber so it
+        # reaches the UI before we clear state for the next model call.  If
+        # the scrubber is mid-span, flush() drops the orphaned content.
+        scrubber = getattr(self, "_stream_context_scrubber", None)
+        if scrubber is not None:
+            tail = scrubber.flush()
+            if tail:
+                callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+                for cb in callbacks:
+                    try:
+                        cb(tail)
+                    except Exception:
+                        pass
+                self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
@@ -6002,6 +6427,28 @@ class AIAgent:
         if getattr(self, "_stream_needs_break", False) and text and text.strip():
             self._stream_needs_break = False
             text = "\n\n" + text
+            prepended_break = True
+        else:
+            prepended_break = False
+        if isinstance(text, str):
+            # Strip <think> blocks first (per-delta is safe for closed pairs; the
+            # unterminated-tag path is handled downstream by stream_consumer).
+            # Then feed through the stateful context scrubber so memory-context
+            # spans split across chunks cannot leak to the UI (#5719).
+            text = self._strip_think_blocks(text or "")
+            scrubber = getattr(self, "_stream_context_scrubber", None)
+            if scrubber is not None:
+                text = scrubber.feed(text)
+            else:
+                # Defensive: legacy callers without the scrubber attribute.
+                text = sanitize_context(text)
+            # Only strip leading newlines on the first delta — mid-stream "\n" is legitimate markdown.
+            if not prepended_break and not getattr(
+                self, "_current_streamed_assistant_text", ""
+            ):
+                text = text.lstrip("\n")
+        if not text:
+            return
         callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
         delivered = False
         for cb in callbacks:
@@ -6197,7 +6644,8 @@ class AIAgent:
                 ),
             }
             request_client_holder["client"] = self._create_request_openai_client(
-                reason="chat_completion_stream_request"
+                reason="chat_completion_stream_request",
+                api_kwargs=stream_kwargs,
             )
             # Reset stale-stream timer so the detector measures from this
             # attempt's start, not a previous attempt's last chunk.
@@ -7044,6 +7492,9 @@ class AIAgent:
                 )
             )
 
+            # LM Studio: preload before probing the fallback's context length.
+            self._ensure_lmstudio_runtime_loaded()
+
             # Update context compressor limits for the fallback model.
             # Without this, compression decisions use the primary model's
             # context window (e.g. 200K) instead of the fallback's (e.g. 32K),
@@ -7763,6 +8214,8 @@ class AIAgent:
             or base_url_host_matches(self.base_url, "moonshot.ai")
             or base_url_host_matches(self.base_url, "moonshot.cn")
         )
+        _is_tokenhub = base_url_host_matches(self._base_url_lower, "tokenhub.tencentmaas.com")
+        _is_lmstudio = (self.provider or "").strip().lower() == "lmstudio"
 
         # Temperature: _fixed_temperature_for_model may return OMIT_TEMPERATURE
         # sentinel (temperature omitted entirely), a numeric override, or None.
@@ -7834,6 +8287,8 @@ class AIAgent:
             is_github_models=_is_gh,
             is_nvidia_nim=_is_nvidia,
             is_kimi=_is_kimi,
+            is_tokenhub=_is_tokenhub,
+            is_lmstudio=_is_lmstudio,
             is_custom_provider=self.provider == "custom",
             ollama_num_ctx=self._ollama_num_ctx,
             provider_preferences=_prefs or None,
@@ -7844,7 +8299,9 @@ class AIAgent:
             omit_temperature=_omit_temp,
             supports_reasoning=self._supports_reasoning_extra_body(),
             github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
+            lmstudio_reasoning_options=self._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
             anthropic_max_output=_ant_max,
+            provider_name=self.provider,
         )
 
     def _supports_reasoning_extra_body(self) -> bool:
@@ -7868,6 +8325,10 @@ class AIAgent:
                 return bool(github_model_reasoning_efforts(self.model))
             except Exception:
                 return False
+        if (self.provider or "").strip().lower() == "lmstudio":
+            opts = self._lmstudio_reasoning_options_cached()
+            # "off-only" (or absent) means no real reasoning capability.
+            return any(opt and opt != "off" for opt in opts)
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -7881,8 +8342,56 @@ class AIAgent:
             "x-ai/",
             "google/gemini-2",
             "qwen/qwen3",
+            "tencent/hy3-preview",
         )
         return any(model.startswith(prefix) for prefix in reasoning_model_prefixes)
+
+    def _lmstudio_reasoning_options_cached(self) -> list[str]:
+        """Probe LM Studio's published reasoning ``allowed_options`` once per
+        (model, base_url). The list (e.g. ``["off","on"]`` or
+        ``["off","minimal","low"]``) is needed both for the supports-reasoning
+        gate and for clamping the emitted ``reasoning_effort`` so toggle-style
+        models don't 400 on ``high``. Cache is keyed on (model, base_url) so
+        ``/model`` swaps and base-URL changes don't reuse a stale list.
+        Non-empty results are cached permanently (model capabilities don't
+        change). Empty results (transient probe failure OR genuinely
+        non-reasoning model) are cached with a 60-second TTL to avoid an
+        HTTP round-trip on every turn while still retrying reasonably soon.
+        """
+        import time as _time
+
+        cache = getattr(self, "_lm_reasoning_opts_cache", None)
+        if cache is None:
+            cache = self._lm_reasoning_opts_cache = {}
+        key = (self.model, self.base_url)
+        cached = cache.get(key)
+        if cached is not None:
+            opts, ts = cached
+            # Non-empty → permanent. Empty → 60s TTL.
+            if opts or (_time.monotonic() - ts) < 60:
+                return opts
+        try:
+            from hermes_cli.models import lmstudio_model_reasoning_options
+            opts = lmstudio_model_reasoning_options(
+                self.model, self.base_url, getattr(self, "api_key", ""),
+            )
+        except Exception:
+            opts = []
+        cache[key] = (opts, _time.monotonic())
+        return opts
+
+    def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
+        """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
+
+        The iteration-limit summary path calls ``chat.completions.create()``
+        directly, bypassing the transport. Share the helper so the two paths
+        can't drift on effort resolution and clamping.
+        """
+        from agent.lmstudio_reasoning import resolve_lmstudio_effort
+        return resolve_lmstudio_effort(
+            self.reasoning_config,
+            self._lmstudio_reasoning_options_cached(),
+        )
 
     def _github_models_reasoning_extra_body(self) -> dict | None:
         """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
@@ -7991,6 +8500,31 @@ class AIAgent:
                 # persisted message causes HTTP 400. Include empty string
                 # as a defensive compatibility fallback (refs #15250).
                 msg["reasoning_content"] = ""
+
+        # Additive fallback (refs #16844, #16884). Streaming-only providers
+        # (glm, MiniMax, gpt-5.x via aigw, Anthropic via openai-compat shims)
+        # accumulate reasoning through ``delta.reasoning_content`` chunks
+        # but never land it on the message object as a top-level attribute,
+        # so neither branch above fires and the chain-of-thought is stored
+        # only under the internal ``reasoning`` key. When the user later
+        # replays that history through a DeepSeek-v4 / Kimi thinking model,
+        # the missing ``reasoning_content`` causes HTTP 400 ("The
+        # reasoning_content in the thinking mode must be passed back to the
+        # API.").
+        #
+        # Promote the already-sanitized streamed ``reasoning_text`` to
+        # ``reasoning_content`` at write time, but ONLY when no prior branch
+        # already set it AND we actually captured reasoning text. This
+        # preserves every existing behavior:
+        #   - SDK-exposed ``reasoning_content`` (OpenAI/Moonshot/DeepSeek SDK)
+        #     still wins.
+        #   - DeepSeek tool-call ""-pad (#15250) still fires.
+        #   - Non-thinking turns with no reasoning leave the field absent,
+        #     so ``_copy_reasoning_content_for_api``'s cross-provider leak
+        #     guard (#15748) and ``reasoning``→``reasoning_content``
+        #     promotion tiers still apply at replay time.
+        if "reasoning_content" not in msg and reasoning_text:
+            msg["reasoning_content"] = reasoning_text
 
         if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
             # Pass reasoning_details back unmodified so providers (OpenRouter,
@@ -8352,6 +8886,23 @@ class AIAgent:
                     f"⚠ Compression summary failed: {summary_error}. "
                     "Inserted a fallback context marker."
                 )
+        else:
+            # No hard failure — but did the configured aux model error out
+            # and get recovered by retrying on main?  Surface that so users
+            # know their auxiliary.compression.model setting is broken even
+            # though compression succeeded.
+            _aux_fail_model = getattr(self.context_compressor, "_last_aux_model_failure_model", None)
+            _aux_fail_err = getattr(self.context_compressor, "_last_aux_model_failure_error", None)
+            if _aux_fail_model:
+                # Dedup on (model, error) so we don't spam on every compaction
+                _aux_key = (_aux_fail_model, _aux_fail_err)
+                if getattr(self, "_last_aux_fallback_warning_key", None) != _aux_key:
+                    self._last_aux_fallback_warning_key = _aux_key
+                    self._emit_warning(
+                        f"ℹ Configured compression model '{_aux_fail_model}' failed "
+                        f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
+                        "check auxiliary.compression.model in config.yaml."
+                    )
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -8406,6 +8957,23 @@ class AIAgent:
                 )
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
+
+        # Notify memory providers of the compression-driven session_id rotation
+        # so provider-cached per-session state (Hindsight's _document_id,
+        # accumulated turn buffers, counters) refreshes. reset=False because
+        # the logical conversation continues; only the id and DB row rolled
+        # over. See #6672.
+        try:
+            _old_sid = locals().get("old_session_id")
+            if _old_sid and self._memory_manager:
+                self._memory_manager.on_session_switch(
+                    self.session_id or "",
+                    parent_session_id=_old_sid,
+                    reset=False,
+                    reason="compression",
+                )
+        except Exception as _me_err:
+            logger.debug("memory manager on_session_switch (compression): %s", _me_err)
 
         # Warn on repeated compressions (quality degrades with each pass)
         _cc = self.context_compressor.compression_count
@@ -9345,6 +9913,10 @@ class AIAgent:
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
 
+            # Same safety net as the main loop: drop thinking-only assistant
+            # turns so Anthropic-family providers don't 400 the summary call.
+            api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
             summary_extra_body = {}
             try:
                 from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE as _OMIT_TEMP
@@ -9359,7 +9931,19 @@ class AIAgent:
             _omit_summary_temperature = _raw_summary_temp is _OMIT_TEMP
             _summary_temperature = None if _omit_summary_temperature else _raw_summary_temp
             _is_nous = "nousresearch" in self._base_url_lower
-            if self._supports_reasoning_extra_body():
+            # LM Studio uses top-level `reasoning_effort` (not extra_body.reasoning).
+            # Mirror ChatCompletionsTransport.build_kwargs() so the summary path
+            # — which calls chat.completions.create() directly without going
+            # through the transport — sends the same shape the transport does.
+            _is_lmstudio_summary = (
+                (self.provider or "").strip().lower() == "lmstudio"
+                and self._supports_reasoning_extra_body()
+            )
+            _lm_reasoning_effort: str | None = (
+                self._resolve_lmstudio_summary_reasoning_effort()
+                if _is_lmstudio_summary else None
+            )
+            if not _is_lmstudio_summary and self._supports_reasoning_extra_body():
                 if self.reasoning_config is not None:
                     summary_extra_body["reasoning"] = self.reasoning_config
                 else:
@@ -9386,6 +9970,8 @@ class AIAgent:
                     summary_kwargs["temperature"] = _summary_temperature
                 if self.max_tokens is not None:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                if _lm_reasoning_effort is not None:
+                    summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
 
                 # Include provider routing preferences
                 provider_preferences = {}
@@ -9451,6 +10037,8 @@ class AIAgent:
                         summary_kwargs["temperature"] = _summary_temperature
                     if self.max_tokens is not None:
                         summary_kwargs.update(self._max_tokens_param(self.max_tokens))
+                    if _lm_reasoning_effort is not None:
+                        summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 
@@ -9523,16 +10111,6 @@ class AIAgent:
             user_message = _sanitize_surrogates(user_message)
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
-
-        # Strip leaked <memory-context> blocks from user input.  When Honcho's
-        # saveMessages persists a turn that included injected context, the block
-        # can reappear in the next turn's user message via message history.
-        # Stripping here prevents stale memory tags from leaking into the
-        # conversation and being visible to the user or the model as user text.
-        if isinstance(user_message, str):
-            user_message = sanitize_context(user_message)
-        if isinstance(persist_user_message, str):
-            persist_user_message = sanitize_context(persist_user_message)
 
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
@@ -9610,6 +10188,13 @@ class AIAgent:
         
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
+
+        # Reset the streaming context scrubber at the top of each turn so a
+        # hung span from a prior interrupted stream can't taint this turn's
+        # output.
+        scrubber = getattr(self, "_stream_context_scrubber", None)
+        if scrubber is not None:
+            scrubber.reset()
 
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
@@ -10057,6 +10642,16 @@ class AIAgent:
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
 
+            # Drop thinking-only assistant turns (reasoning but no visible
+            # output and no tool_calls) and merge any adjacent user messages
+            # left behind. Prevents Anthropic 400s ("The final block in an
+            # assistant message cannot be `thinking`.") and equivalent errors
+            # from third-party Anthropic-compatible gateways that can't replay
+            # a thinking-only turn. Runs on the per-call copy only — the
+            # stored conversation history keeps the reasoning block for the
+            # UI transcript and session persistence.
+            api_messages = self._drop_thinking_only_and_merge_users(api_messages)
+
             # Normalize message whitespace and tool-call JSON for consistent
             # prefix matching.  Ensures bit-perfect prefixes across turns,
             # which enables KV cache reuse on local inference servers
@@ -10251,6 +10846,16 @@ class AIAgent:
                     # attempt — switch to non-streaming for the rest of this
                     # session instead of re-failing every retry.
                     if getattr(self, "_disable_streaming", False):
+                        _use_streaming = False
+                    # CopilotACPClient communicates via subprocess stdio and
+                    # returns a plain SimpleNamespace — not an iterable
+                    # stream.  Mirror the ACP exclusion used for Responses
+                    # API upgrade (lines ~1083-1085).
+                    elif (
+                        self.provider == "copilot-acp"
+                        or str(self.base_url or "").lower().startswith("acp://copilot")
+                        or str(self.base_url or "").lower().startswith("acp+tcp://")
+                    ):
                         _use_streaming = False
                     elif not self._has_stream_consumers():
                         # No display/TTS consumer. Still prefer streaming for
@@ -12636,7 +13241,6 @@ class AIAgent:
                         truncated_response_prefix = ""
                         length_continue_retries = 0
                     
-                    # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)

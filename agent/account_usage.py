@@ -109,7 +109,7 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
     for detail in snapshot.details:
         lines.append(detail)
     if snapshot.unavailable_reason:
-        lines.append(f"Unavailable: {snapshot.unavailable_reason}")
+        lines.append(f"不可用：{snapshot.unavailable_reason}")
     return lines
 
 
