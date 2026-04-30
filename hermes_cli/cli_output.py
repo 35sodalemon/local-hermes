@@ -9,33 +9,41 @@ import getpass
 
 from hermes_cli.colors import Colors, color
 
+# ─── i18n: 自动翻译用户可见字符串 ────────────────────────────────────────────
+
+try:
+    from hermes_cli.i18n import translate as _maybe_translate
+except ImportError:
+    def _maybe_translate(text: str) -> str:
+        return text
+
 
 # ─── Print Helpers ────────────────────────────────────────────────────────────
 
 
 def print_info(text: str) -> None:
     """Print a dim informational message."""
-    print(color(f"  {text}", Colors.DIM))
+    print(color(f"  {_maybe_translate(text)}", Colors.DIM))
 
 
 def print_success(text: str) -> None:
     """Print a green success message with ✓ prefix."""
-    print(color(f"✓ {text}", Colors.GREEN))
+    print(color(f"✓ {_maybe_translate(text)}", Colors.GREEN))
 
 
 def print_warning(text: str) -> None:
     """Print a yellow warning message with ⚠ prefix."""
-    print(color(f"⚠ {text}", Colors.YELLOW))
+    print(color(f"⚠ {_maybe_translate(text)}", Colors.YELLOW))
 
 
 def print_error(text: str) -> None:
     """Print a red error message with ✗ prefix."""
-    print(color(f"✗ {text}", Colors.RED))
+    print(color(f"✗ {_maybe_translate(text)}", Colors.RED))
 
 
 def print_header(text: str) -> None:
     """Print a bold yellow header."""
-    print(color(f"\n  {text}", Colors.YELLOW))
+    print(color(f"\n  {_maybe_translate(text)}", Colors.YELLOW))
 
 
 # ─── Input Prompts ────────────────────────────────────────────────────────────
