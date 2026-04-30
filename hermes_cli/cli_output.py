@@ -12,7 +12,8 @@ from hermes_cli.colors import Colors, color
 # ─── i18n: 自动翻译用户可见字符串 ────────────────────────────────────────────
 
 try:
-    from hermes_cli.i18n import translate as _maybe_translate
+    from hermes_cli.i18n import translate as _maybe_translate, install_print_patch
+    install_print_patch()  # 裸 print() 也自动翻译
 except ImportError:
     def _maybe_translate(text: str) -> str:
         return text
