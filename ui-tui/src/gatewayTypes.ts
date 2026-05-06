@@ -47,7 +47,7 @@ export type CommandDispatchResponse =
   | { output?: string; type: 'exec' | 'plugin' }
   | { target: string; type: 'alias' }
   | { message?: string; name: string; type: 'skill' }
-  | { message: string; type: 'send' }
+  | { message: string; notice?: string; type: 'send' }
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -75,8 +75,14 @@ export interface ConfigDisplayConfig {
   tui_statusbar?: 'bottom' | 'off' | 'on' | 'top' | boolean
 }
 
+export interface ConfigVoiceConfig {
+  // Raw `yaml.safe_load()` value from config; may be non-string if hand-edited.
+  // Callers must normalize/validate at runtime (parseVoiceRecordKey()).
+  record_key?: unknown
+}
+
 export interface ConfigFullResponse {
-  config?: { display?: ConfigDisplayConfig }
+  config?: { display?: ConfigDisplayConfig; voice?: ConfigVoiceConfig }
 }
 
 export interface ConfigMtimeResponse {
@@ -129,6 +135,10 @@ export interface SessionListResponse {
   sessions?: SessionListItem[]
 }
 
+export interface SessionDeleteResponse {
+  deleted: string
+}
+
 export interface SessionMostRecentResponse {
   session_id?: null | string
   source?: string
@@ -166,10 +176,24 @@ export interface SessionUsageResponse {
   total?: number
 }
 
+export interface SessionStatusResponse {
+  output?: string
+}
+
 export interface SessionCompressResponse {
+  after_messages?: number
+  after_tokens?: number
+  before_messages?: number
+  before_tokens?: number
   info?: SessionInfo
   messages?: GatewayTranscriptMessage[]
   removed?: number
+  summary?: {
+    headline?: string
+    noop?: boolean
+    note?: null | string
+    token_line?: string
+  }
   usage?: Usage
 }
 
@@ -265,6 +289,7 @@ export interface VoiceToggleResponse {
   available?: boolean
   details?: string
   enabled?: boolean
+  record_key?: string
   stt_available?: boolean
   tts?: boolean
 }
@@ -288,7 +313,10 @@ export interface ToolsConfigureResponse {
 // ── Model picker ─────────────────────────────────────────────────────
 
 export interface ModelOptionProvider {
+  auth_type?: string
+  authenticated?: boolean
   is_current?: boolean
+  key_env?: string
   models?: string[]
   name: string
   slug: string
@@ -306,6 +334,7 @@ export interface ModelOptionsResponse {
 
 export interface ReloadMcpResponse {
   status?: string
+  message?: string
 }
 
 export interface ReloadEnvResponse {
@@ -478,6 +507,7 @@ export type GatewayEvent =
   | { payload: { request_id: string }; session_id?: string; type: 'sudo.request' }
   | { payload: { env_var: string; prompt: string; request_id: string }; session_id?: string; type: 'secret.request' }
   | { payload: { task_id: string; text: string }; session_id?: string; type: 'background.complete' }
+  | { payload?: { text?: string }; session_id?: string; type: 'review.summary' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.spawn_requested' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.start' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.thinking' }

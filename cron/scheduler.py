@@ -35,7 +35,7 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home
-from hermes_cli.config import load_config
+from hermes_cli.config import load_config, _expand_env_vars
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
@@ -114,18 +114,36 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
-# Resolve Hermes home directory (respects HERMES_HOME override)
-_hermes_home = get_hermes_home()
+# Backward-compatible module override used by tests and emergency monkeypatches.
+_hermes_home: Path | None = None
 
-# File-based lock prevents concurrent ticks from gateway + daemon + systemd timer
-_LOCK_DIR = _hermes_home / "cron"
-_LOCK_FILE = _LOCK_DIR / ".tick.lock"
+
+def _get_hermes_home() -> Path:
+    """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
+    return _hermes_home or get_hermes_home()
+
+
+def _get_lock_paths() -> tuple[Path, Path]:
+    """Resolve cron lock paths at call time so profile/env changes are honored."""
+    hermes_home = _get_hermes_home()
+    lock_dir = hermes_home / "cron"
+    return lock_dir, lock_dir / ".tick.lock"
 
 
 def _resolve_origin(job: dict) -> Optional[dict]:
-    """Extract origin info from a job, preserving any extra routing metadata."""
+    """Extract origin info from a job, preserving any extra routing metadata.
+
+    Treats non-dict origins (free-form provenance strings, ints, lists from
+    migration scripts or hand-edited jobs.json) as missing instead of
+    crashing with ``AttributeError`` on ``origin.get(...)``. Without this
+    guard, a job tagged with e.g. ``"combined-digest-replaces-x-and-y"``
+    crashed every fire attempt with
+    ``'str' object has no attribute 'get'`` — ``mark_job_run`` recorded the
+    failure, but the next tick re-loaded the same poisoned origin and
+    crashed identically until the field was patched manually (#18722).
+    """
     origin = job.get("origin")
-    if not origin:
+    if not isinstance(origin, dict):
         return None
     platform = origin.get("platform")
     chat_id = origin.get("chat_id")
@@ -145,6 +163,19 @@ def _get_home_target_chat_id(platform_name: str) -> str:
         if legacy:
             value = os.getenv(legacy, "")
     return value
+
+
+def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
+    """Return the optional thread/topic ID for a platform home target."""
+    env_var = _HOME_TARGET_ENV_VARS.get(platform_name.lower())
+    if not env_var:
+        return None
+    value = os.getenv(f"{env_var}_THREAD_ID", "").strip()
+    if not value:
+        legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
+        if legacy:
+            value = os.getenv(f"{legacy}_THREAD_ID", "").strip()
+    return value or None
 
 
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
@@ -175,7 +206,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
                 return {
                     "platform": platform_name,
                     "chat_id": chat_id,
-                    "thread_id": None,
+                    "thread_id": _get_home_target_thread_id(platform_name),
                 }
         return None
 
@@ -229,7 +260,7 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
     return {
         "platform": platform_name,
         "chat_id": chat_id,
-        "thread_id": None,
+        "thread_id": _get_home_target_thread_id(platform_name),
     }
 
 
@@ -277,13 +308,21 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     return targets[0] if targets else None
 
 
-# Media extension sets — keep in sync with gateway/platforms/base.py:_process_message_background
-_AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a'})
+# Media extension sets — audio routing is centralized in gateway.platforms.base
+# via should_send_media_as_audio() so Telegram-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
 _IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
 
 
-def _send_media_via_adapter(adapter, chat_id: str, media_files: list, metadata: dict | None, loop, job: dict) -> None:
+def _send_media_via_adapter(
+    adapter,
+    chat_id: str,
+    media_files: list,
+    metadata: dict | None,
+    loop,
+    job: dict,
+    platform=None,
+) -> None:
     """Send extracted MEDIA files as native platform attachments via a live adapter.
 
     Routes each file to the appropriate adapter method (send_voice, send_image_file,
@@ -292,10 +331,13 @@ def _send_media_via_adapter(adapter, chat_id: str, media_files: list, metadata: 
     """
     from pathlib import Path
 
+    from gateway.platforms.base import should_send_media_as_audio
+
     for media_path, _is_voice in media_files:
         try:
             ext = Path(media_path).suffix.lower()
-            if ext in _AUDIO_EXTS:
+            route_platform = platform if platform is not None else getattr(adapter, "platform", None)
+            if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
                 coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
             elif ext in _VIDEO_EXTS:
                 coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
@@ -341,27 +383,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
-    platform_map = {
-        "telegram": Platform.TELEGRAM,
-        "discord": Platform.DISCORD,
-        "slack": Platform.SLACK,
-        "whatsapp": Platform.WHATSAPP,
-        "signal": Platform.SIGNAL,
-        "matrix": Platform.MATRIX,
-        "mattermost": Platform.MATTERMOST,
-        "homeassistant": Platform.HOMEASSISTANT,
-        "dingtalk": Platform.DINGTALK,
-        "feishu": Platform.FEISHU,
-        "wecom": Platform.WECOM,
-        "wecom_callback": Platform.WECOM_CALLBACK,
-        "weixin": Platform.WEIXIN,
-        "email": Platform.EMAIL,
-        "sms": Platform.SMS,
-        "bluebubbles": Platform.BLUEBUBBLES,
-        "qqbot": Platform.QQBOT,
-        "yuanbao": Platform.YUANBAO,
-    }
-
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
     # in config.yaml for clean output.
@@ -404,7 +425,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         thread_id = target.get("thread_id")
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
-        origin = job.get("origin") or {}
+        origin = _resolve_origin(job) or {}
         origin_thread = origin.get("thread_id")
         if origin_thread and not thread_id:
             logger.warning(
@@ -418,9 +439,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 job["id"], platform_name, chat_id, thread_id,
             )
 
-        platform = platform_map.get(platform_name.lower())
-        if not platform:
+        # Built-in names resolve to their enum member; plugin platform names
+        # create dynamic members via Platform._missing_().
+        try:
+            platform = Platform(platform_name.lower())
+        except (ValueError, KeyError):
             msg = f"unknown platform '{platform_name}'"
+            logger.warning("Job '%s': %s", job["id"], msg)
+            delivery_errors.append(msg)
+            continue
+
+        pconfig = config.platforms.get(platform)
+        if not pconfig or not pconfig.enabled:
+            msg = f"platform '{platform_name}' not configured/enabled"
             logger.warning("Job '%s': %s", job["id"], msg)
             delivery_errors.append(msg)
             continue
@@ -455,7 +486,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
                 # Send extracted media files as native attachments via the live adapter
                 if adapter_ok and media_files:
-                    _send_media_via_adapter(runtime_adapter, chat_id, media_files, send_metadata, loop, job)
+                    _send_media_via_adapter(
+                        runtime_adapter,
+                        chat_id,
+                        media_files,
+                        send_metadata,
+                        loop,
+                        job,
+                        platform=platform,
+                    )
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
@@ -467,13 +506,6 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 )
 
         if not delivered:
-            pconfig = config.platforms.get(platform)
-            if not pconfig or not pconfig.enabled:
-                msg = f"platform '{platform_name}' not configured/enabled"
-                logger.warning("Job '%s': %s", job["id"], msg)
-                delivery_errors.append(msg)
-                continue
-
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
             try:
@@ -552,8 +584,18 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     prevent arbitrary script execution via path traversal or absolute
     path injection.
 
+    Supported interpreters (chosen by file extension):
+
+    * ``.sh`` / ``.bash`` — run with ``/bin/bash``
+    * anything else — run with the current Python interpreter
+      (``sys.executable``), preserving the original behaviour for
+      Python-based pre-check and data-collection scripts.
+
+    Shell support lets ``no_agent=True`` jobs ship classic bash watchdogs
+    (the `memory-watchdog.sh` pattern) without wrapping them in Python.
+
     Args:
-        script_path: Path to a Python script.  Relative paths are resolved
+        script_path: Path to the script.  Relative paths are resolved
             against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
             are also validated to ensure they stay within the scripts dir.
 
@@ -563,7 +605,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     """
     from hermes_constants import get_hermes_home
 
-    scripts_dir = get_hermes_home() / "scripts"
+    scripts_dir = _get_hermes_home() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     scripts_dir_resolved = scripts_dir.resolve()
 
@@ -590,9 +632,19 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
 
     script_timeout = _get_script_timeout()
 
+    # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
+    # everything else.  We deliberately do NOT honour the file's own
+    # shebang: the scripts dir is trusted, but keeping the interpreter
+    # choice explicit here keeps the allowed surface small and auditable.
+    suffix = path.suffix.lower()
+    if suffix in (".sh", ".bash"):
+        argv = ["/bin/bash", str(path)]
+    else:
+        argv = [sys.executable, str(path)]
+
     try:
         result = subprocess.run(
-            [sys.executable, str(path)],
+            argv,
             capture_output=True,
             text=True,
             timeout=script_timeout,
@@ -682,10 +734,8 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                     f"{prompt}"
                 )
             else:
-                prompt = (
-                    "[Script ran successfully but produced no output.]\n\n"
-                    f"{prompt}"
-                )
+                # Script produced no output — nothing to report, skip AI call.
+                return None
         else:
             prompt = (
                 "## Script Error\n"
@@ -758,6 +808,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         return prompt
 
     from tools.skills_tool import skill_view
+    from tools.skill_usage import bump_use
 
     parts = []
     skipped: list[str] = []
@@ -768,6 +819,12 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
             skipped.append(skill_name)
             continue
+
+        # Bump usage so the curator sees this skill as actively used.
+        try:
+            bump_use(skill_name)
+        except Exception:
+            logger.debug("Cron job: failed to bump skill usage for '%s'", skill_name, exc_info=True)
 
         content = str(loaded.get("content") or "").strip()
         if parts:
@@ -801,8 +858,120 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     Returns:
         Tuple of (success, full_output_doc, final_response, error_message)
     """
+    job_id = job["id"]
+    job_name = job["name"]
+
+    # ---------------------------------------------------------------
+    # no_agent short-circuit — the script IS the job, no LLM involvement.
+    # ---------------------------------------------------------------
+    # This mirrors the classic "run a bash script on a timer, send its
+    # stdout to telegram" watchdog pattern. The agent path is skipped
+    # entirely: no AIAgent, no prompt, no tool loop, no token spend.
+    #
+    # We check this BEFORE importing run_agent / constructing SessionDB so
+    # a pure-script tick never pays for the agent machinery it isn't going
+    # to use. Keep this block self-contained.
+    #
+    # Semantics:
+    #   - script stdout (trimmed) → delivered verbatim as the final message
+    #   - empty stdout            → silent run (no delivery, success=True)
+    #   - non-zero exit / timeout → delivered as an error alert, success=False
+    #   - wakeAgent=false gate    → treated like empty stdout (silent), since
+    #                               the whole point of no_agent is that there
+    #                               is no agent to wake
+    if job.get("no_agent"):
+        script_path = job.get("script")
+        if not script_path:
+            err = "no_agent=True but no script is set for this job"
+            logger.error("Job '%s': %s", job_id, err)
+            return False, "", "", err
+
+        # Apply workdir if configured — lets scripts use predictable relative
+        # paths. For no_agent jobs this is just the subprocess cwd (not an
+        # agent TERMINAL_CWD bridge).
+        _job_workdir = (job.get("workdir") or "").strip() or None
+        _prior_cwd = None
+        if _job_workdir and Path(_job_workdir).is_dir():
+            _prior_cwd = os.getcwd()
+            try:
+                os.chdir(_job_workdir)
+            except OSError:
+                _prior_cwd = None
+
+        try:
+            ok, output = _run_job_script(script_path)
+        finally:
+            if _prior_cwd is not None:
+                try:
+                    os.chdir(_prior_cwd)
+                except OSError:
+                    pass
+
+        now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if not ok:
+            # Script crashed / timed out / exited non-zero.  Deliver the
+            # error so the user knows the watchdog itself broke — silent
+            # failure for an alerting job is the worst-case outcome.
+            alert = (
+                f"⚠ Cron watchdog '{job_name}' script failed\n\n"
+                f"{output}\n\n"
+                f"Time: {now_iso}"
+            )
+            doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {now_iso}\n"
+                f"**Mode:** no_agent (script)\n"
+                f"**Status:** script failed\n\n"
+                f"{output}\n"
+            )
+            return False, doc, alert, output
+
+        # Honour the wakeAgent gate as a silent signal — `wakeAgent: false`
+        # means "nothing to report this tick", same as empty stdout.
+        if not _parse_wake_gate(output):
+            logger.info(
+                "Job '%s' (no_agent): wakeAgent=false gate — silent run", job_id
+            )
+            silent_doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {now_iso}\n"
+                f"**Mode:** no_agent (script)\n"
+                f"**Status:** silent (wakeAgent=false)\n"
+            )
+            return True, silent_doc, SILENT_MARKER, None
+
+        if not output.strip():
+            logger.info("Job '%s' (no_agent): empty stdout — silent run", job_id)
+            silent_doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {now_iso}\n"
+                f"**Mode:** no_agent (script)\n"
+                f"**Status:** silent (empty output)\n"
+            )
+            return True, silent_doc, SILENT_MARKER, None
+
+        doc = (
+            f"# Cron Job: {job_name}\n\n"
+            f"**Job ID:** {job_id}\n"
+            f"**Run Time:** {now_iso}\n"
+            f"**Mode:** no_agent (script)\n\n"
+            f"---\n\n"
+            f"{output}\n"
+        )
+        return True, doc, output, None
+
+    # ---------------------------------------------------------------
+    # Default (LLM) path — import and construct the agent machinery now
+    # that we know we actually need it. Doing these imports here instead of
+    # at module top keeps no_agent ticks from paying for AIAgent / SessionDB
+    # construction costs.
+    # ---------------------------------------------------------------
     from run_agent import AIAgent
-    
+
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
     _session_db = None
@@ -811,9 +980,6 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _session_db = SessionDB()
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
-    
-    job_id = job["id"]
-    job_name = job["name"]
 
     # Wake-gate: if this job has a pre-check script, run it BEFORE building
     # the prompt so a ``{"wakeAgent": false}`` response can short-circuit
@@ -838,6 +1004,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             return True, silent_doc, SILENT_MARKER, None
 
     prompt = _build_job_prompt(job, prerun_script=prerun_script)
+    if prompt is None:
+        logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
+        return True, "", SILENT_MARKER, None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -860,6 +1029,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         chat_id=str(origin["chat_id"]) if origin else "",
         chat_name=origin.get("chat_name", "") if origin else "",
     )
+    _cron_delivery_vars = (
+        "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+        "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
+        "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+    )
+    for _var_name in _cron_delivery_vars:
+        _VAR_MAP[_var_name].set("")
 
     # Per-job working directory.  When set (and validated at create/update
     # time), we point TERMINAL_CWD at it so:
@@ -890,16 +1066,19 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # changes take effect without a gateway restart.
         from dotenv import load_dotenv
         try:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="utf-8")
+            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
         except UnicodeDecodeError:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="latin-1")
+            load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set(delivery_target["platform"])
             _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CHAT_ID"].set(str(delivery_target["chat_id"]))
-            if delivery_target.get("thread_id") is not None:
-                _VAR_MAP["HERMES_CRON_AUTO_DELIVER_THREAD_ID"].set(str(delivery_target["thread_id"]))
+            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_THREAD_ID"].set(
+                ""
+                if delivery_target.get("thread_id") is None
+                else str(delivery_target["thread_id"])
+            )
 
         model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
@@ -907,10 +1086,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cfg = {}
         try:
             import yaml
-            _cfg_path = str(_hermes_home / "config.yaml")
+            _cfg_path = str(_get_hermes_home() / "config.yaml")
             if os.path.exists(_cfg_path):
                 with open(_cfg_path) as _f:
                     _cfg = yaml.safe_load(_f) or {}
+                _cfg = _expand_env_vars(_cfg)
                 _model_cfg = _cfg.get("model", {})
                 if not job.get("model"):
                     if isinstance(_model_cfg, str):
@@ -940,7 +1120,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         if prefill_file:
             pfpath = Path(prefill_file).expanduser()
             if not pfpath.is_absolute():
-                pfpath = _hermes_home / pfpath
+                pfpath = _get_hermes_home() / pfpath
             if pfpath.exists():
                 try:
                     with open(pfpath, "r", encoding="utf-8") as _pf:
@@ -963,8 +1143,13 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         )
         from hermes_cli.auth import AuthError
         try:
+            # Do not inject HERMES_INFERENCE_PROVIDER here. resolve_runtime_provider()
+            # already prefers persisted config over stale shell/env overrides when
+            # no explicit provider is requested. Passing the env var here short-
+            # circuits that precedence and can resurrect old providers (for
+            # example DeepSeek) for cron jobs that do not pin provider/model.
             runtime_kwargs = {
-                "requested": job.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER"),
+                "requested": job.get("provider"),
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
@@ -1033,10 +1218,12 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             enabled_toolsets=_resolve_cron_enabled_toolsets(job, _cfg),
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
-            # When a workdir is configured, inject AGENTS.md / CLAUDE.md /
-            # .cursorrules from that directory; otherwise preserve the old
-            # behaviour (don't inject SOUL.md/AGENTS.md from the scheduler cwd).
+            # Cron jobs should always inherit the user's SOUL.md identity from
+            # HERMES_HOME. When a workdir is configured, also inject project
+            # context files (AGENTS.md / CLAUDE.md / .cursorrules) from there.
+            # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
+            load_soul_identity=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
@@ -1051,7 +1238,18 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         #
         # Uses the agent's built-in activity tracker (updated by
         # _touch_activity() on every tool call, API call, and stream delta).
-        _cron_timeout = float(os.getenv("HERMES_CRON_TIMEOUT", 600))
+        _raw_cron_timeout = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
+        if _raw_cron_timeout:
+            try:
+                _cron_timeout = float(_raw_cron_timeout)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid HERMES_CRON_TIMEOUT=%r; using default 600s",
+                    _raw_cron_timeout,
+                )
+                _cron_timeout = 600.0
+        else:
+            _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -1126,6 +1324,21 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"agent.run_conversation returned {type(result).__name__} instead of dict: {result!r}"
             )
 
+        # If the agent itself reported failure (e.g. all retries exhausted on
+        # API errors, model abort, mid-run interrupt), do not silently mark the
+        # job as successful. run_agent populates `failed=True`/`completed=False`
+        # on these paths and may put the error into `final_response`, which
+        # would otherwise be delivered as if it were the agent's reply and the
+        # job's `last_status` set to "ok". Raise so the except handler below
+        # builds the proper failure tuple. (issue #17855)
+        if result.get("failed") is True or result.get("completed") is False:
+            _err_text = (
+                result.get("error")
+                or (result.get("final_response") or "").strip()
+                or "agent reported failure"
+            )
+            raise RuntimeError(_err_text)
+
         final_response = result.get("final_response", "") or ""
         # Strip leaked placeholder text that upstream may inject on empty completions.
         if final_response.strip() == "(No response generated)":
@@ -1185,6 +1398,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
         # Clean up ContextVar session/delivery state for this job.
         clear_session_vars(_ctx_tokens)
+        for _var_name in _cron_delivery_vars:
+            _VAR_MAP[_var_name].set("")
         if _session_db:
             try:
                 _session_db.end_session(_cron_session_id, "cron_complete")
@@ -1229,12 +1444,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
     Returns:
         Number of jobs executed (0 if another tick is already running)
     """
-    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    lock_dir, lock_file = _get_lock_paths()
+    lock_dir.mkdir(parents=True, exist_ok=True)
 
     # Cross-platform file locking: fcntl on Unix, msvcrt on Windows
     lock_fd = None
     try:
-        lock_fd = open(_LOCK_FILE, "w")
+        lock_fd = open(lock_file, "w")
         if fcntl:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         elif msvcrt:

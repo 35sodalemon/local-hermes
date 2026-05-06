@@ -5,6 +5,7 @@ Pure display functions with no HermesCLI state dependency.
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -122,69 +123,98 @@ def get_available_skills() -> Dict[str, List[str]]:
 # Cache update check results for 6 hours to avoid repeated git fetches
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
+# Sentinel returned when we know an update exists but can't count commits
+# (e.g. nix-built hermes — no local git history to count against).
+UPDATE_AVAILABLE_NO_COUNT = -1
+
+_UPSTREAM_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+
+
+def _check_via_rev(local_rev: str) -> Optional[int]:
+    """Compare an embedded git revision to upstream main via ls-remote.
+
+    Returns 0 if up-to-date, ``UPDATE_AVAILABLE_NO_COUNT`` if behind,
+    or ``None`` on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    upstream_rev = result.stdout.split()[0]
+    if not upstream_rev:
+        return None
+    return 0 if upstream_rev == local_rev else UPDATE_AVAILABLE_NO_COUNT
+
+
+def _check_via_local_git(repo_dir: Path) -> Optional[int]:
+    """Count commits behind origin/main in a local checkout."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "--quiet"],
+            capture_output=True, timeout=10,
+            cwd=str(repo_dir),
+        )
+    except Exception:
+        pass  # Offline or timeout — use stale refs, that's fine
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            return int(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
 
 def check_for_updates() -> Optional[int]:
-    """Check how many commits behind upstream/main (or origin/main) the local repo is.
+    """Check whether a Hermes update is available.
 
-    Does a ``git fetch`` at most once every 6 hours (cached to
-    ``~/.hermes/.update_check``).  Returns the number of commits behind,
-    or ``None`` if the check fails or isn't applicable.
+    Two paths: if ``HERMES_REVISION`` is set (nix builds embed it), compare
+    it to upstream main via ``git ls-remote``. Otherwise look for a local
+    git checkout and count commits behind ``origin/main``.
 
-    Priority: checks upstream/main first (official repo), falls back to origin/main (fork).
+    Returns the number of commits behind, ``UPDATE_AVAILABLE_NO_COUNT`` (-1)
+    if behind but the count is unknown, ``0`` if up-to-date, or ``None`` if
+    the check failed or doesn't apply. Cached for 6 hours.
     """
     hermes_home = get_hermes_home()
-    repo_dir = hermes_home / "hermes-agent"
     cache_file = hermes_home / ".update_check"
+    embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Must be a git repo — fall back to project root for dev installs
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    if not (repo_dir / ".git").exists():
-        return None
-
-    # Read cache
+    # Read cache — invalidate if the embedded rev has changed since last check
     now = time.time()
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
-            if now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
+            if (
+                now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
+                and cached.get("rev") == embedded_rev
+            ):
                 return cached.get("behind")
     except Exception:
         pass
 
-    # Fetch latest refs from both origin and upstream (fast — only ref metadata)
-    for remote in ("origin", "upstream"):
-        try:
-            subprocess.run(
-                ["git", "fetch", remote, "--quiet"],
-                capture_output=True, timeout=10,
-                cwd=str(repo_dir),
-            )
-        except Exception:
-            pass  # Offline or timeout — use stale refs
+    if embedded_rev:
+        behind = _check_via_rev(embedded_rev)
+    else:
+        repo_dir = hermes_home / "hermes-agent"
+        if not (repo_dir / ".git").exists():
+            repo_dir = Path(__file__).parent.parent.resolve()
+        if not (repo_dir / ".git").exists():
+            return None
+        behind = _check_via_local_git(repo_dir)
 
-    # Count commits behind — prefer upstream/main, fall back to origin/main
-    behind = None
-    for ref in ("upstream/main", "origin/main"):
-        try:
-            result = subprocess.run(
-                ["git", "rev-list", "--count", f"HEAD..{ref}"],
-                capture_output=True, text=True, timeout=5,
-                cwd=str(repo_dir),
-            )
-            if result.returncode == 0:
-                count = int(result.stdout.strip())
-                if count > 0:
-                    behind = count
-                    break  # upstream has updates, use it
-                elif behind is None:
-                    behind = 0  # this ref is up to date, keep checking upstream
-        except Exception:
-            continue
-
-    # Write cache
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind}))
+        cache_file.write_text(json.dumps({"ts": now, "behind": behind, "rev": embedded_rev}))
     except Exception:
         pass
 
@@ -512,12 +542,6 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                     f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
                     f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
                 )
-            elif srv.get("lazy"):
-                # 懒加载模式：显示待连接提示
-                right_lines.append(
-                    f"[dim {dim}]{srv['name']}[/] [dim]({srv['transport']})[/] "
-                    f"[dim]— lazy load[/]"
-                )
             else:
                 right_lines.append(
                     f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "
@@ -563,13 +587,23 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     # Update check — use prefetched result if available
     try:
         behind = get_update_result(timeout=0.5)
-        if behind and behind > 0:
-            from hermes_cli.config import recommended_update_command
-            commits_word = "commit" if behind == 1 else "commits"
-            right_lines.append(
-                f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
-                f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
-            )
+        if behind is not None and behind != 0:
+            from hermes_cli.config import get_managed_update_command, recommended_update_command
+            if behind > 0:
+                commits_word = "commit" if behind == 1 else "commits"
+                right_lines.append(
+                    f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
+                    f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
+                )
+            else:
+                # UPDATE_AVAILABLE_NO_COUNT: nix-built hermes; we know an update
+                # exists but not by how much, and we don't know how the user
+                # installed it (nix run, profile, system flake, home-manager).
+                managed_cmd = get_managed_update_command()
+                line = "[bold yellow]⚠ update available[/]"
+                if managed_cmd:
+                    line += f"[dim yellow] — run [bold]{managed_cmd}[/bold][/]"
+                right_lines.append(line)
     except Exception:
         pass  # Never break the banner over an update check
 
