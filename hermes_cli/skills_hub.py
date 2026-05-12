@@ -593,7 +593,7 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             answer = input("Confirm [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
-        if answer not in ("y", "yes"):
+        if answer not in {"y", "yes"}:
             c.print("[dim]Installation cancelled.[/]\n")
             shutil.rmtree(q_path, ignore_errors=True)
             return
@@ -772,9 +772,6 @@ def do_list(source_filter: str = "all",
     ``skills.disabled`` list because ``-p`` swaps ``HERMES_HOME`` at process
     start.  No explicit profile flag needed here.
     """
-
-def do_list(source_filter: str = "all", console: Optional[Console] = None) -> None:
-    """List installed skills, distinguishing hub, builtin, and local skills."""
     from tools.skills_hub import HubLockFile, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _find_all_skills
@@ -790,17 +787,16 @@ def do_list(source_filter: str = "all", console: Optional[Console] = None) -> No
     all_skills = _find_all_skills(skip_disabled=True)
     disabled_names = get_disabled_skill_names()
 
-    title = "已安装技能"
+    title = "Installed Skills"
     if enabled_only:
-        title += "（仅已启用）"
+        title += " (enabled only)"
 
     table = Table(title=title)
-    table.add_column("名称", style="bold cyan")
-    table.add_column("分类", style="dim")
-    table.add_column("描述", style="dim", no_wrap=False, ratio=3)
-    table.add_column("来源", style="dim")
-    table.add_column("信任", style="dim")
-    table.add_column("状态", style="dim")
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Category", style="dim")
+    table.add_column("Source", style="dim")
+    table.add_column("Trust", style="dim")
+    table.add_column("Status", style="dim")
 
     hub_count = 0
     builtin_count = 0
@@ -849,17 +845,14 @@ def do_list(source_filter: str = "all", console: Optional[Console] = None) -> No
 
         trust_style = {"builtin": "bright_cyan", "trusted": "green", "community": "yellow", "local": "dim"}.get(trust, "dim")
         trust_label = "official" if source_display == "official" else trust
-        desc = skill.get("description", "")
-        if desc and len(desc) > 40:
-            desc = desc[:37] + "..."
-        table.add_row(name, category, desc or "-", source_display, f"[{trust_style}]{trust_label}[/]", status_cell)
+        table.add_row(name, category, source_display, f"[{trust_style}]{trust_label}[/]", status_cell)
 
     c.print(table)
-    summary = f"[dim]{hub_count} 仓库安装, {builtin_count} 内置, {local_count} 本地"
+    summary = f"[dim]{hub_count} hub-installed, {builtin_count} builtin, {local_count} local"
     if enabled_only:
-        summary += f" — {enabled_count} 已启用"
+        summary += f" — {enabled_count} enabled shown"
     else:
-        summary += f" — {enabled_count} 已启用, {disabled_count} 已禁用"
+        summary += f" — {enabled_count} enabled, {disabled_count} disabled"
     summary += "[/]\n"
     c.print(summary)
 
@@ -955,7 +948,7 @@ def do_uninstall(name: str, console: Optional[Console] = None,
             answer = input("Confirm [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
-        if answer not in ("y", "yes"):
+        if answer not in {"y", "yes"}:
             c.print("[dim]Cancelled.[/]\n")
             return
 
@@ -973,6 +966,51 @@ def do_uninstall(name: str, console: Optional[Console] = None,
             c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
     else:
         c.print(f"[bold red]Error:[/] {msg}\n")
+
+
+def do_reset(name: str, restore: bool = False,
+             console: Optional[Console] = None,
+             skip_confirm: bool = False,
+             invalidate_cache: bool = True) -> None:
+    """Reset a bundled skill's manifest tracking (+ optionally restore from bundled)."""
+    from tools.skills_sync import reset_bundled_skill
+
+    c = console or _console
+
+    if not skip_confirm and restore:
+        c.print(f"\n[bold]Restore '{name}' from bundled source?[/]")
+        c.print("[dim]This will DELETE your current copy and re-copy the bundled version.[/]")
+        try:
+            answer = input("Confirm [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            c.print("[dim]Cancelled.[/]\n")
+            return
+
+    result = reset_bundled_skill(name, restore=restore)
+
+    if not result["ok"]:
+        c.print(f"[bold red]Error:[/] {result['message']}\n")
+        return
+
+    c.print(f"[bold green]{result['message']}[/]")
+    synced = result.get("synced") or {}
+    if synced.get("copied"):
+        c.print(f"[dim]Copied: {', '.join(synced['copied'])}[/]")
+    if synced.get("updated"):
+        c.print(f"[dim]Updated: {', '.join(synced['updated'])}[/]")
+    c.print()
+
+    if invalidate_cache:
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    else:
+        c.print("[dim]Change will take effect in your next session.[/]")
+        c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
 
 
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
@@ -998,7 +1036,7 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
 
     elif action == "add":
         if not repo:
-            c.print("[bold red]错误:[/] 需要指定仓库。用法: hermes skills tap add owner/repo\n")
+            c.print("[bold red]Error:[/] Repo required. Usage: hermes skills tap add owner/repo\n")
             return
         if mgr.add(repo):
             c.print(f"[bold green]Added tap:[/] {repo}\n")
@@ -1007,7 +1045,7 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
 
     elif action == "remove":
         if not repo:
-            c.print("[bold red]错误:[/] 需要指定仓库。用法: hermes skills tap remove owner/repo\n")
+            c.print("[bold red]Error:[/] Repo required. Usage: hermes skills tap remove owner/repo\n")
             return
         if mgr.remove(repo):
             c.print(f"[bold green]Removed tap:[/] {repo}\n")
@@ -1015,7 +1053,7 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
             c.print(f"[bold red]Error:[/] Tap not found: {repo}\n")
 
     else:
-        c.print(f"[bold red]未知 tap 操作:[/] {action}. 可用操作: list, add, remove\n")
+        c.print(f"[bold red]Unknown tap action:[/] {action}. Use: list, add, remove\n")
 
 
 def do_publish(skill_path: str, target: str = "github", repo: str = "",
@@ -1064,7 +1102,7 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
     if target == "github":
         if not repo:
             c.print("[bold red]Error:[/] --repo required for GitHub publish.\n"
-                    "用法: hermes skills publish <路径> --to github --repo owner/repo\n")
+                    "Usage: hermes skills publish <path> --to github --repo owner/repo\n")
             return
 
         auth = GitHubAuth()
@@ -1084,7 +1122,7 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
         c.print("[yellow]ClawHub publishing is not yet supported. "
                 "Submit manually at https://clawhub.ai/submit[/]\n")
     else:
-        c.print(f"[bold red]未知目标:[/] {target}. 请使用 'github' 或 'clawhub'。\n")
+        c.print(f"[bold red]Unknown target:[/] {target}. Use 'github' or 'clawhub'.\n")
 
 
 def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
@@ -1100,7 +1138,7 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
             f"https://api.github.com/repos/{target_repo}/forks",
             headers=headers, timeout=30,
         )
-        if resp.status_code in (200, 202):
+        if resp.status_code in {200, 202}:
             fork = resp.json()
             fork_repo = fork["full_name"]
         elif resp.status_code == 403:
@@ -1219,7 +1257,7 @@ def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> N
         sys.stdout.write(payload)
     else:
         out = Path(output_path)
-        out.write_text(payload)
+        out.write_text(payload, encoding="utf-8")
         c.print(f"[bold green]Snapshot exported:[/] {out}")
         c.print(f"[dim]{len(installed)} skill(s), {len(tap_list)} tap(s)[/]\n")
 
@@ -1236,7 +1274,7 @@ def do_snapshot_import(input_path: str, force: bool = False,
         return
 
     try:
-        snapshot = json.loads(inp.read_text())
+        snapshot = json.loads(inp.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         c.print(f"[bold red]Error:[/] Invalid JSON in {inp}\n")
         return
@@ -1302,6 +1340,9 @@ def skills_command(args) -> None:
         do_audit(name=getattr(args, "name", None))
     elif action == "uninstall":
         do_uninstall(args.name)
+    elif action == "reset":
+        do_reset(args.name, restore=getattr(args, "restore", False),
+                 skip_confirm=getattr(args, "yes", False))
     elif action == "publish":
         do_publish(
             args.skill_path,
@@ -1315,16 +1356,16 @@ def skills_command(args) -> None:
         elif snap_action == "import":
             do_snapshot_import(args.input, force=getattr(args, "force", False))
         else:
-            _console.print("用法: hermes skills snapshot [export|import]\n")
+            _console.print("Usage: hermes skills snapshot [export|import]\n")
     elif action == "tap":
         tap_action = getattr(args, "tap_action", None)
         repo = getattr(args, "repo", "") or getattr(args, "name", "")
         if not tap_action:
-            _console.print("用法: hermes skills tap [list|add|remove]\n")
+            _console.print("Usage: hermes skills tap [list|add|remove]\n")
             return
         do_tap(tap_action, repo=repo)
     else:
-        _console.print("用法: hermes skills [browse|search|install|inspect|list|check|update|audit|uninstall|publish|snapshot|tap]\n")
+        _console.print("Usage: hermes skills [browse|search|install|inspect|list|check|update|audit|uninstall|reset|publish|snapshot|tap]\n")
         _console.print("Run 'hermes skills <command> --help' for details.\n")
 
 
@@ -1394,7 +1435,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "search":
         if not args:
-            c.print("[bold red]用法:[/] /skills search <关键词> [--source skills-sh|well-known|github|official] [--limit N]\n")
+            c.print("[bold red]Usage:[/] /skills search <query> [--source skills-sh|well-known|github|official] [--limit N]\n")
             return
         source = "all"
         limit = 10
@@ -1417,7 +1458,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "install":
         if not args:
-            c.print("[bold red]用法:[/] /skills install <标识符或URL> [--name <名称>] [--category <分类>] [--force] [--now]\n")
+            c.print("[bold red]Usage:[/] /skills install <identifier-or-url> [--name <name>] [--category <cat>] [--force] [--now]\n")
             return
         identifier = args[0]
         category = ""
@@ -1440,7 +1481,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "inspect":
         if not args:
-            c.print("[bold red]用法:[/] /skills inspect <标识符>\n")
+            c.print("[bold red]Usage:[/] /skills inspect <identifier>\n")
             return
         do_inspect(args[0], console=c)
 
@@ -1467,7 +1508,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "uninstall":
         if not args:
-            c.print("[bold red]用法:[/] /skills uninstall <名称> [--now]\n")
+            c.print("[bold red]Usage:[/] /skills uninstall <name> [--now]\n")
             return
         # Slash commands run inside prompt_toolkit where input() hangs.
         skip_confirm = True
@@ -1475,9 +1516,22 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         do_uninstall(args[0], console=c, skip_confirm=skip_confirm,
                      invalidate_cache=invalidate_cache)
 
+    elif action == "reset":
+        if not args:
+            c.print("[bold red]Usage:[/] /skills reset <name> [--restore] [--now]\n")
+            c.print("[dim]Clears the bundled-skills manifest entry so future updates stop marking it as user-modified.[/]")
+            c.print("[dim]Pass --restore to also replace the current copy with the bundled version.[/]\n")
+            return
+        name = args[0]
+        restore = "--restore" in args
+        invalidate_cache = "--now" in args
+        # Slash commands can't prompt — --restore in slash mode is implicit consent.
+        do_reset(name, restore=restore, console=c, skip_confirm=True,
+                 invalidate_cache=invalidate_cache)
+
     elif action == "publish":
         if not args:
-            c.print("[bold red]用法:[/] /skills publish <技能路径> [--to github] [--repo owner/repo]\n")
+            c.print("[bold red]Usage:[/] /skills publish <skill-path> [--to github] [--repo owner/repo]\n")
             return
         skill_path = args[0]
         target = "github"
@@ -1491,7 +1545,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "snapshot":
         if not args:
-            c.print("[bold red]用法:[/] /skills snapshot export <文件> | /skills snapshot import <文件>\n")
+            c.print("[bold red]Usage:[/] /skills snapshot export <file> | /skills snapshot import <file>\n")
             return
         snap_action = args[0]
         if snap_action == "export" and len(args) > 1:
@@ -1500,7 +1554,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
             force = "--force" in args
             do_snapshot_import(args[1], force=force, console=c)
         else:
-            c.print("[bold red]用法:[/] /skills snapshot export <文件> | /skills snapshot import <文件>\n")
+            c.print("[bold red]Usage:[/] /skills snapshot export <file> | /skills snapshot import <file>\n")
 
     elif action == "tap":
         if not args:
@@ -1510,30 +1564,31 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         repo = args[1] if len(args) > 1 else ""
         do_tap(tap_action, repo=repo, console=c)
 
-    elif action in ("help", "--help", "-h"):
+    elif action in {"help", "--help", "-h"}:
         _print_skills_help(c)
 
     else:
-        c.print(f"[bold red]未知操作:[/] {action}")
+        c.print(f"[bold red]Unknown action:[/] {action}")
         _print_skills_help(c)
 
 
 def _print_skills_help(console: Console) -> None:
     """Print help for the /skills slash command."""
     console.print(Panel(
-        "[bold]技能中心命令：[/]\n\n"
-        "  [cyan]browse[/] [--source official]   浏览所有可用技能（分页）\n"
-        "  [cyan]search[/] <关键词>              搜索技能注册表\n"
-        "  [cyan]install[/] <标识符>             安装技能（含安全扫描）\n"
-        "  [cyan]inspect[/] <标识符>             预览技能内容（不安装）\n"
+        "[bold]Skills Hub Commands:[/]\n\n"
+        "  [cyan]browse[/] [--source official]   Browse all available skills (paginated)\n"
+        "  [cyan]search[/] <query>              Search registries for skills\n"
+        "  [cyan]install[/] <identifier>        Install a skill (with security scan)\n"
+        "  [cyan]inspect[/] <identifier>        Preview a skill without installing\n"
         "  [cyan]list[/] [--source hub|builtin|local] [--enabled-only]\n"
-        "       列出已安装的技能；--enabled-only 仅显示已启用\n"
-        "  [cyan]check[/] [名称]                 检查技能是否有上游更新\n"
-        "  [cyan]update[/] [名称]                更新技能到最新版本\n"
-        "  [cyan]audit[/] [名称]                 重新扫描技能安全性\n"
-        "  [cyan]uninstall[/] <名称>             卸载已安装的技能\n"
-        "  [cyan]publish[/] <路径> --repo <仓库> 通过 PR 发布技能到 GitHub\n"
-        "  [cyan]snapshot[/] export|import       导出/导入技能配置\n"
-        "  [cyan]tap[/] list|add|remove          管理技能来源\n",
+        "       List installed skills; --enabled-only filters to the active profile's live set\n"
+        "  [cyan]check[/] [name]                Check hub skills for upstream updates\n"
+        "  [cyan]update[/] [name]               Update hub skills with upstream changes\n"
+        "  [cyan]audit[/] [name]                Re-scan hub skills for security\n"
+        "  [cyan]uninstall[/] <name>            Remove a hub-installed skill\n"
+        "  [cyan]reset[/] <name> [--restore]    Reset bundled-skill tracking (fix 'user-modified' flag)\n"
+        "  [cyan]publish[/] <path> --repo <r>   Publish a skill to GitHub via PR\n"
+        "  [cyan]snapshot[/] export|import      Export/import skill configurations\n"
+        "  [cyan]tap[/] list|add|remove         Manage skill sources\n",
         title="/skills",
     ))
