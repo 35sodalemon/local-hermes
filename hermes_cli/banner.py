@@ -152,10 +152,24 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
 
 
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+    """Count commits behind upstream/main (or origin/main as fallback)."""
+    # Determine the correct upstream remote — prefer 'upstream' if it exists
+    # (fork workflows), otherwise fall back to 'origin'.
+    remote = "origin"
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "upstream"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            remote = "upstream"
+    except Exception:
+        pass
+
     try:
         subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
+            ["git", "fetch", remote, "--quiet"],
             capture_output=True, timeout=10,
             cwd=str(repo_dir),
         )
@@ -164,7 +178,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
 
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            ["git", "rev-list", "--count", f"HEAD..{remote}/main"],
             capture_output=True, text=True, timeout=5,
             cwd=str(repo_dir),
         )
