@@ -7463,26 +7463,97 @@ def _cmd_update_impl(args, gateway_mode: bool):
         commit_count = int(result.stdout.strip())
 
         if commit_count == 0:
-            _invalidate_update_cache()
-            # Restore stash and switch back to original branch if we moved
-            if auto_stash_ref is not None:
-                _restore_stashed_changes(
-                    git_cmd,
-                    PROJECT_ROOT,
-                    auto_stash_ref,
-                    prompt_user=prompt_for_restore,
-                    input_fn=gw_input_fn,
-                )
-            if current_branch not in {"main", "HEAD"}:
+            # Fork workflow: origin may be up to date but upstream (NousResearch)
+            # could have newer commits. Check and merge upstream BEFORE declaring
+            # "up to date" so `hermes update` actually pulls new code for fork users.
+            if is_fork and branch == "main" and _has_upstream_remote(git_cmd, PROJECT_ROOT):
+                print("→ Checking upstream for new commits...")
                 subprocess.run(
-                    git_cmd + ["checkout", current_branch],
+                    git_cmd + ["fetch", "upstream", "--quiet"],
                     cwd=PROJECT_ROOT,
                     capture_output=True,
-                    text=True,
-                    check=False,
                 )
-            print("✓ Already up to date!")
-            return
+                upstream_behind = _count_commits_between(
+                    git_cmd, PROJECT_ROOT, "HEAD", "upstream/main"
+                )
+                if upstream_behind > 0:
+                    print(f"→ Upstream is {upstream_behind} commit(s) ahead — merging...")
+                    merge_result = subprocess.run(
+                        git_cmd + ["merge", "upstream/main", "--no-edit"],
+                        cwd=PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if merge_result.returncode == 0:
+                        print("  ✓ Merged upstream changes")
+                        # After merge, origin is now behind — re-fetch and
+                        # re-count so the normal pull path below handles push.
+                        subprocess.run(
+                            git_cmd + ["fetch", "origin"],
+                            cwd=PROJECT_ROOT,
+                            capture_output=True,
+                        )
+                        recheck = subprocess.run(
+                            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
+                            cwd=PROJECT_ROOT,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        try:
+                            commit_count = int(recheck.stdout.strip()) if recheck.returncode == 0 else 0
+                        except (ValueError, AttributeError):
+                            commit_count = 0
+                        if commit_count > 0:
+                            print(f"→ Found {commit_count} new commit(s) after upstream merge")
+                            # Fall through to the normal pull + post-update path
+                        else:
+                            # Merged upstream, nothing else to do
+                            _invalidate_update_cache()
+                            if auto_stash_ref is not None:
+                                _restore_stashed_changes(
+                                    git_cmd, PROJECT_ROOT, auto_stash_ref,
+                                    prompt_user=prompt_for_restore,
+                                    input_fn=gw_input_fn,
+                                )
+                            print("✓ Updated from upstream!")
+                            return
+                    else:
+                        print("  ⚠ Merge conflict with upstream — resolving not automatic.")
+                        print("    Try manually: git merge upstream/main")
+                        # Fall through to normal flow
+                else:
+                    # Upstream is not ahead — truly up to date
+                    _invalidate_update_cache()
+                    if auto_stash_ref is not None:
+                        _restore_stashed_changes(
+                            git_cmd, PROJECT_ROOT, auto_stash_ref,
+                            prompt_user=prompt_for_restore,
+                            input_fn=gw_input_fn,
+                        )
+                    print("✓ Already up to date!")
+                    return
+            else:
+                _invalidate_update_cache()
+                # Restore stash and switch back to original branch if we moved
+                if auto_stash_ref is not None:
+                    _restore_stashed_changes(
+                        git_cmd,
+                        PROJECT_ROOT,
+                        auto_stash_ref,
+                        prompt_user=prompt_for_restore,
+                        input_fn=gw_input_fn,
+                    )
+                if current_branch not in {"main", "HEAD"}:
+                    subprocess.run(
+                        git_cmd + ["checkout", current_branch],
+                        cwd=PROJECT_ROOT,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                print("✓ Already up to date!")
+                return
 
         print(f"→ Found {commit_count} new commit(s)")
 
