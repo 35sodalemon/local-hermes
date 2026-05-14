@@ -1812,7 +1812,8 @@ class DiscordAdapter(BasePlatformAdapter):
                     info = OggOpus(audio_path)
                     duration_secs = info.info.length
                 except Exception:
-                    duration_secs = max(1.0, len(file_data) / 2000.0)
+                    # fallback: 估算码率 ~64kbps = 8000 bytes/s
+                    duration_secs = max(1.0, len(file_data) / 8000.0)
 
                 waveform_bytes = bytes([128] * 256)
                 waveform_b64 = base64.b64encode(waveform_bytes).decode()
