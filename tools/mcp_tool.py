@@ -24,6 +24,7 @@ Example config::
         args: ["-y", "@modelcontextprotocol/server-github"]
         env:
           GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_..."
+        supports_parallel_tool_calls: true  # tools from this server may run concurrently
       remote_api:
         url: "https://my-mcp-server.example.com/mcp"
         headers:
@@ -56,6 +57,8 @@ Features:
     - Thread-safe architecture with dedicated background event loop
     - Sampling support: MCP servers can request LLM completions via
       sampling/createMessage (text and tool-use responses)
+    - Parallel tool call opt-in: per-server ``supports_parallel_tool_calls``
+      flag allows concurrent execution of tools from the same server
 
 Architecture:
     A dedicated background event loop (_mcp_loop) runs in a daemon thread.
@@ -278,6 +281,11 @@ _CREDENTIAL_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+# Pre-compiled pattern for ${VAR_NAME} style env-var interpolation.
+# Supports any non-} characters in the variable name (hyphens, dots, etc.)
+# so providers like MY-VAR or my.var work correctly.
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
 # ---------------------------------------------------------------------------
@@ -1499,6 +1507,16 @@ class MCPServerTask:
                 # should not permanently kill the server.
                 # (Ported from Kilo Code's MCP resilience fix.)
                 if not self._ready.is_set():
+                    if _is_auth_error(exc):
+                        logger.warning(
+                            "MCP server '%s' failed initial OAuth authentication, "
+                            "not retrying automatically: %s",
+                            self.name, exc,
+                        )
+                        self._error = exc
+                        self._ready.set()
+                        return
+
                     initial_retries += 1
                     if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
                         logger.warning(
@@ -1766,7 +1784,7 @@ def _handle_auth_error_and_retry(
         return await manager.handle_401(server_name, None)
 
     try:
-        recovered = _run_on_mcp_loop(_recover(), timeout=10)
+        recovered = _run_on_mcp_loop(_recover, timeout=10)
     except Exception as rec_exc:
         logger.warning(
             "MCP OAuth '%s': recovery attempt failed: %s",
@@ -1961,11 +1979,16 @@ def _handle_session_expired_and_retry(
     return None
 
 
+# Sanitized server names whose ``supports_parallel_tool_calls`` config is True.
+# Populated during ``register_mcp_servers()`` and queried by
+# ``is_mcp_tool_parallel_safe()`` for the parallel-execution check in run_agent.
+_parallel_safe_servers: set = set()
+
 # Dedicated event loop running in a background daemon thread.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
 
-# Protects _mcp_loop, _mcp_thread, _servers, and _stdio_pids.
+# Protects _mcp_loop, _mcp_thread, _servers, _parallel_safe_servers, and _stdio_pids.
 _lock = threading.Lock()
 
 # PIDs of stdio MCP server subprocesses.  Tracked so we can force-kill
@@ -2039,19 +2062,35 @@ def _ensure_mcp_loop():
         _mcp_thread.start()
 
 
-def _run_on_mcp_loop(coro, timeout: float = 30):
+def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     """Schedule a coroutine on the MCP event loop and block until done.
+
+    Accepts either a coroutine object or a zero-arg callable that returns one.
+    Callers can pass a factory to avoid constructing coroutine objects when
+    the MCP loop is unavailable (which would otherwise leak the coroutine
+    frame and emit ``"coroutine was never awaited"`` warnings).
 
     Poll in short intervals so the calling agent thread can honor user
     interrupts while the MCP work is still running on the background loop.
     """
     from tools.interrupt import is_interrupted
+    from agent.async_utils import safe_schedule_threadsafe
 
     with _lock:
         loop = _mcp_loop
     if loop is None or not loop.is_running():
+        if asyncio.iscoroutine(coro_or_factory):
+            coro_or_factory.close()
         raise RuntimeError("MCP event loop is not running")
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+    coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+    future = safe_schedule_threadsafe(
+        coro, loop,
+        logger=logger,
+        log_message="MCP scheduling failed",
+    )
+    if future is None:
+        raise RuntimeError("MCP event loop unavailable (failed to schedule)")
     start_time = time.monotonic()
     deadline = None if timeout is None else start_time + timeout
 
@@ -2094,7 +2133,7 @@ def _interpolate_env_vars(value):
     if isinstance(value, str):
         def _replace(m):
             return os.environ.get(m.group(1), m.group(0))
-        return re.sub(r"\$\{([^}]+)\}", _replace, value)
+        return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _interpolate_env_vars(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -2155,55 +2194,6 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
-def _ensure_server_connected(server_name: str) -> bool:
-    """确保MCP服务器已连接，如果未连接则尝试连接。
-    
-    这是懒加载的核心函数，在第一次使用MCP工具时调用。
-    
-    Args:
-        server_name: 服务器名称
-        
-    Returns:
-        bool: 连接成功返回True，失败返回False
-    """
-    # 首先检查是否已连接
-    with _lock:
-        server = _servers.get(server_name)
-    if server and server.session:
-        return True
-    
-    # 确保事件循环已启动
-    _ensure_mcp_loop()
-    
-    # 加载服务器配置
-    servers_config = _load_mcp_config()
-    if server_name not in servers_config:
-        logger.error(f"MCP server '{server_name}' not found in config")
-        return False
-    
-    server_config = servers_config[server_name]
-    
-    # 检查是否启用
-    if not _parse_boolish(server_config.get("enabled", True), default=True):
-        logger.debug(f"MCP server '{server_name}' is disabled")
-        return False
-    
-    # 尝试连接
-    try:
-        connect_timeout = server_config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
-        
-        async def _connect():
-            return await _discover_and_register_server(server_name, server_config)
-        
-        # 在MCP事件循环上运行连接
-        result = _run_on_mcp_loop(_connect(), timeout=connect_timeout)
-        logger.info(f"懒加载连接MCP服务器 '{server_name}' 成功")
-        return True
-    except Exception as e:
-        logger.warning(f"懒加载连接MCP服务器 '{server_name}' 失败: {e}")
-        return False
-
-
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -2241,20 +2231,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         with _lock:
             server = _servers.get(server_name)
         if not server or not server.session:
-            # 尝试懒加载连接
-            if not _ensure_server_connected(server_name):
-                _bump_server_error(server_name)
-                return json.dumps({
-                    "error": f"MCP server '{server_name}' is not connected and failed to connect"
-                }, ensure_ascii=False)
-            # 重新获取服务器连接
-            with _lock:
-                server = _servers.get(server_name)
-            if not server or not server.session:
-                _bump_server_error(server_name)
-                return json.dumps({
-                    "error": f"MCP server '{server_name}' connection failed"
-                }, ensure_ascii=False)
+            _bump_server_error(server_name)
+            return json.dumps({
+                "error": f"MCP server '{server_name}' is not connected"
+            }, ensure_ascii=False)
 
         async def _call():
             async with server._rpc_lock:
@@ -2307,7 +2287,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             return json.dumps({"result": text_result}, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout)
 
         try:
             result = _call_once()
@@ -2387,7 +2367,7 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
             return json.dumps({"resources": resources}, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout)
 
         try:
             return _call_once()
@@ -2447,7 +2427,7 @@ def _make_read_resource_handler(server_name: str, tool_timeout: float):
             return json.dumps({"result": "\n".join(parts) if parts else ""}, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout)
 
         try:
             return _call_once()
@@ -2510,7 +2490,7 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
             return json.dumps({"prompts": prompts}, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout)
 
         try:
             return _call_once()
@@ -2581,7 +2561,7 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
             return json.dumps(resp, ensure_ascii=False)
 
         def _call_once():
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+            return _run_on_mcp_loop(_call, timeout=tool_timeout)
 
         try:
             return _call_once()
@@ -2614,18 +2594,9 @@ def _make_check_fn(server_name: str):
     """Return a check function that verifies the MCP connection is alive."""
 
     def _check() -> bool:
-        # 首先检查是否已连接
         with _lock:
             server = _servers.get(server_name)
-        if server and server.session:
-            return True
-        
-        # 如果未连接，尝试懒加载连接（但不阻塞太久）
-        # 这里使用较短的超时时间，因为check_fn可能在启动时被调用
-        try:
-            return _ensure_server_connected(server_name)
-        except Exception:
-            return False
+        return server is not None and server.session is not None
 
     return _check
 
@@ -3135,6 +3106,12 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
             for k, v in servers.items()
             if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
         }
+        # Track which servers opt-in to parallel tool calls (idempotent).
+        for srv_name, srv_cfg in servers.items():
+            if _parse_boolish(srv_cfg.get("supports_parallel_tool_calls", False), default=False):
+                _parallel_safe_servers.add(sanitize_mcp_name_component(srv_name))
+            else:
+                _parallel_safe_servers.discard(sanitize_mcp_name_component(srv_name))
 
     if not new_servers:
         return _existing_tool_names()
@@ -3174,7 +3151,7 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     if _was_interrupted:
         _set_interrupt(False)
     try:
-        _run_on_mcp_loop(_discover_all(), timeout=120)
+        _run_on_mcp_loop(_discover_all, timeout=120)
     finally:
         if _was_interrupted:
             _set_interrupt(True)
@@ -3243,6 +3220,29 @@ def discover_mcp_tools() -> List[str]:
         logger.info(summary)
 
     return tool_names
+
+
+def is_mcp_tool_parallel_safe(tool_name: str) -> bool:
+    """Check if an MCP tool belongs to a server that supports parallel tool calls.
+
+    MCP tool names follow the pattern ``mcp_{server}_{tool}``.  This extracts
+    the server component and checks it against the set of servers whose config
+    includes ``supports_parallel_tool_calls: true``.
+
+    Returns False for non-MCP tools or tools from servers without the flag.
+    """
+    if not tool_name.startswith("mcp_"):
+        return False
+    # Strip the "mcp_" prefix and extract the server name.
+    # Tool names are: mcp_{sanitized_server}_{sanitized_tool}
+    # We need to check all possible server prefixes because the server name
+    # itself may contain underscores after sanitization.
+    rest = tool_name[4:]  # strip "mcp_"
+    with _lock:
+        for server_name in _parallel_safe_servers:
+            if rest.startswith(server_name + "_") and len(rest) > len(server_name) + 1:
+                return True
+    return False
 
 
 def discover_mcp_tools_lazy() -> List[str]:
@@ -3357,8 +3357,6 @@ def _make_placeholder_handler(server_name: str):
             }, ensure_ascii=False)
     
     return _handler
-
-
 def get_mcp_status() -> List[dict]:
     """Return status of all configured MCP servers for banner display.
 
@@ -3394,7 +3392,6 @@ def get_mcp_status() -> List[dict]:
                 "transport": transport,
                 "tools": 0,
                 "connected": False,
-                "lazy": True,  # 懒加载模式：尚未连接，使用时自动连接
             })
 
     return result
@@ -3457,7 +3454,7 @@ def probe_mcp_server_tools() -> Dict[str, List[tuple]]:
         )
 
     try:
-        _run_on_mcp_loop(_probe_all(), timeout=120)
+        _run_on_mcp_loop(_probe_all, timeout=120)
     except Exception as exc:
         logger.debug("MCP probe failed: %s", exc)
     finally:
@@ -3497,11 +3494,17 @@ def shutdown_mcp_servers():
     with _lock:
         loop = _mcp_loop
     if loop is not None and loop.is_running():
-        try:
-            future = asyncio.run_coroutine_threadsafe(_shutdown(), loop)
-            future.result(timeout=15)
-        except Exception as exc:
-            logger.debug("Error during MCP shutdown: %s", exc)
+        from agent.async_utils import safe_schedule_threadsafe
+        future = safe_schedule_threadsafe(
+            _shutdown(), loop,
+            logger=logger,
+            log_message="MCP shutdown: failed to schedule",
+        )
+        if future is not None:
+            try:
+                future.result(timeout=15)
+            except Exception as exc:
+                logger.debug("Error during MCP shutdown: %s", exc)
 
     _stop_mcp_loop()
 

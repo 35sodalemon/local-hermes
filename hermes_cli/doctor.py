@@ -152,6 +152,30 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
     return updated_available, updated_unavailable
 
 
+def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool:
+    """Return True when a direct API-key probe failure is non-blocking.
+
+    Some provider families support both a direct API-key path and a separate
+    OAuth runtime path. When the OAuth path is already healthy, doctor should
+    still show a failed API-key connectivity row, but it should not promote
+    that direct-key problem into the final blocking summary.
+    """
+    try:
+        from hermes_cli.auth import (
+            get_gemini_oauth_auth_status,
+            get_minimax_oauth_auth_status,
+        )
+    except Exception:
+        return False
+
+    normalized = (provider_label or "").strip().lower()
+    if normalized in {"google / gemini", "gemini"}:
+        return bool((get_gemini_oauth_auth_status() or {}).get("logged_in"))
+    if normalized == "minimax":
+        return bool((get_minimax_oauth_auth_status() or {}).get("logged_in"))
+    return False
+
+
 def check_ok(text: str, detail: str = ""):
     print(f"  {color('✓', Colors.GREEN)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
@@ -287,7 +311,8 @@ def _build_apikey_providers_list() -> list:
                 (_pp.models_url or (_pp.base_url.rstrip("/") + "/models"))
                 if _pp.base_url else None
             )
-            _static.append((_label, _key_vars, _models_url, _base_var, True))
+            _hc = getattr(_pp, "supports_health_check", True)
+            _static.append((_label, _key_vars, _models_url, _base_var, _hc))
     except Exception:
         pass
     return _static
@@ -296,19 +321,101 @@ def _build_apikey_providers_list() -> list:
 def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
+    ack_target = getattr(args, 'ack', None)
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.
     os.environ.setdefault("HERMES_INTERACTIVE", "1")
-    
+
+    # Handle `hermes doctor --ack <id>` as a fast path. Persist the ack and
+    # return without running the rest of the diagnostics — the user has
+    # already seen the advisory and just wants to silence it.
+    if ack_target:
+        from hermes_cli.security_advisories import (
+            ADVISORIES,
+            ack_advisory,
+        )
+        valid_ids = {a.id for a in ADVISORIES}
+        if ack_target not in valid_ids:
+            print(color(
+                f"Unknown advisory ID: {ack_target!r}. Known IDs: "
+                f"{', '.join(sorted(valid_ids)) or '(none)'}",
+                Colors.RED,
+            ))
+            sys.exit(2)
+        if ack_advisory(ack_target):
+            print(color(
+                f"  ✓ Acknowledged advisory {ack_target}. "
+                f"It will no longer trigger startup banners.",
+                Colors.GREEN,
+            ))
+        else:
+            print(color(
+                f"  ✗ Failed to persist ack for {ack_target}. "
+                f"Check ~/.hermes/config.yaml is writable.",
+                Colors.RED,
+            ))
+            sys.exit(1)
+        return
+
     issues = []
     manual_issues = []  # issues that can't be auto-fixed
     fixed_count = 0
-    
+
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
     print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+
+    # =========================================================================
+    # Check: Security advisories  (RUNS FIRST — these are the most urgent)
+    # =========================================================================
+    print()
+    print(color("◆ Security Advisories", Colors.CYAN, Colors.BOLD))
+    try:
+        from hermes_cli.security_advisories import (
+            detect_compromised,
+            filter_unacked,
+            full_remediation_text,
+            get_acked_ids,
+        )
+        all_hits = detect_compromised()
+        fresh_hits = filter_unacked(all_hits)
+        if fresh_hits:
+            for hit in fresh_hits:
+                check_fail(
+                    f"{hit.advisory.title}",
+                    f"({hit.package}=={hit.installed_version})",
+                )
+                # Print the full remediation block, indented under the
+                # check_fail header so it reads as a single section.
+                for line in full_remediation_text(hit):
+                    if line:
+                        print(f"    {color(line, Colors.YELLOW)}")
+                    else:
+                        print()
+                # Funnel into the action list so the summary block surfaces it
+                # for users who scroll past the section.
+                manual_issues.append(
+                    f"Resolve security advisory {hit.advisory.id}: "
+                    f"uninstall {hit.package}=={hit.installed_version} and "
+                    f"rotate credentials, then run "
+                    f"`hermes doctor --ack {hit.advisory.id}`."
+                )
+            # Acked-but-still-installed: show as informational so the user
+            # knows the package is still on disk after the ack.
+            acked_ids = get_acked_ids()
+            for h in all_hits:
+                if h.advisory.id in acked_ids:
+                    check_warn(
+                        f"{h.package}=={h.installed_version} still installed "
+                        f"(advisory {h.advisory.id} acknowledged)",
+                    )
+        else:
+            check_ok("No active security advisories")
+    except Exception as e:
+        # Never let a bug in the advisory check block the rest of doctor.
+        check_warn(f"Security advisory check failed: {e}")
     
     # =========================================================================
     # Check: Python version
@@ -573,15 +680,17 @@ def run_doctor(args):
         if fallback_config.exists():
             check_ok("cli-config.yaml exists (in project directory)")
         else:
-            example_config = PROJECT_ROOT / 'cli-config.yaml.example'
-            if should_fix and example_config.exists():
+            if should_fix:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(example_config), str(config_path))
-                check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
+                example_config = PROJECT_ROOT / 'cli-config.yaml.example'
+                if example_config.exists():
+                    shutil.copy2(str(example_config), str(config_path))
+                    check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
+                else:
+                    from hermes_cli.config import DEFAULT_CONFIG, save_config
+                    save_config(DEFAULT_CONFIG)
+                    check_ok(f"Created {_DHH}/config.yaml from defaults")
                 fixed_count += 1
-            elif should_fix:
-                check_warn("config.yaml not found and no example to copy from")
-                manual_issues.append(f"Create {_DHH}/config.yaml manually")
             else:
                 check_warn("config.yaml not found", "(using defaults)")
 
@@ -1509,31 +1618,12 @@ def run_doctor(args):
                 print(f"  {_glyph} {_label} {_detail}")
             else:
                 print(f"  {_glyph} {_label}")
-        for _issue in _r.issues:
+        _issues_to_add = list(_r.issues)
+        if _issues_to_add and _has_healthy_oauth_fallback_for_apikey_provider(_r.label):
+            _issues_to_add = []
+        for _issue in _issues_to_add:
             issues.append(_issue)
 
-    # =========================================================================
-    # Check: Submodules
-    # =========================================================================
-    print()
-    print(color("◆ Submodules", Colors.CYAN, Colors.BOLD))
-    
-    # tinker-atropos (RL training backend)
-    tinker_dir = PROJECT_ROOT / "tinker-atropos"
-    if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
-        if py_version >= (3, 11):
-            try:
-                __import__("tinker_atropos")
-                check_ok("tinker-atropos", "(RL training backend)")
-            except ImportError:
-                install_cmd = f"{_python_install_cmd()} -e ./tinker-atropos"
-                check_warn("tinker-atropos found but not installed", f"(run: {install_cmd})")
-                issues.append(f"Install tinker-atropos: {install_cmd}")
-        else:
-            check_warn("tinker-atropos requires Python 3.11+", f"(current: {py_version.major}.{py_version.minor})")
-    else:
-        check_warn("tinker-atropos not found", "(run: git submodule update --init --recursive)")
-    
     # =========================================================================
     # Check: Tool Availability
     # =========================================================================
