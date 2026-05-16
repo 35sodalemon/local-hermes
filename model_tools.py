@@ -35,6 +35,312 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Admin-only tool permission guard
+# =============================================================================
+
+# ── 管理员专属工具（非管理员一律禁止）──
+_ADMIN_ONLY_TOOLS = {
+    "memory",                     # 记忆增删改查
+    "skills_list", "skill_view", "skill_manage",  # 技能增删改查
+    "process",                    # 管理后台进程
+    "cronjob",                    # 创建/管理定时任务
+    "session_search",             # 搜索历史会话
+    "delegate_task",              # 派生子 Agent
+    "todo",                       # 任务管理
+}
+
+# ── 需要路径检查的文件工具（非管理员可在安全路径操作）──
+_PATH_CHECK_TOOLS = {
+    "read_file", "write_file", "patch", "search_files", "send_message",
+}
+
+# ── 需要命令内容检查的执行工具 ──
+_CMD_CHECK_TOOLS = {
+    "terminal", "execute_code",
+}
+
+# ── 受保护路径前缀（非管理员禁止访问）──
+_PROTECTED_PATH_PREFIXES = (
+    "/usr/local/lib/hermes-agent/",   # hermes 项目代码
+    "/root/.hermes/",                  # 配置、记忆、会话、日志
+    "/root/.env",                      # API 密钥
+    "/etc/",                           # 系统配置
+    "/root/",                          # 管理员主目录（含 .env、SOUL.md 等）
+    "/boot/", "/sbin/", "/bin/",       # 系统关键目录
+)
+
+# ── 受保护文件名（在任何路径下都禁止访问）──
+_PROTECTED_FILENAMES = (
+    "config.yaml", "config.yml",
+    ".env", ".env.local",
+    "SOUL.md", "AGENTS.md",
+)
+
+# ── 安装类命令模式（非管理员禁止执行）──
+_INSTALL_CMD_PATTERNS = (
+    "pip install", "pip3 install",
+    "npm install", "npm i ",
+    "apt install", "apt-get install",
+    "yum install", "dnf install",
+    "brew install", "gem install",
+    "cargo install", "go install",
+    "conda install",
+)
+
+# ── 磁盘配额限制（非管理员在 /tmp 的最大占用）──
+_TMP_QUOTA_MB = 500
+
+# ── 单文件写入大小限制 ──
+_MAX_WRITE_FILE_MB = 50
+
+
+def _is_protected_path(path: str) -> bool:
+    """检查路径是否在受保护区域（非管理员禁止访问）
+    处理路径穿越（../）和符号链接"""
+    if not path:
+        return False
+    import os
+
+    # 先标准化（消除 ../ 和冗余 /）
+    normalized = os.path.abspath(path)
+
+    # 解析符号链接的真实目标
+    try:
+        real_path = os.path.realpath(normalized)
+    except Exception:
+        real_path = normalized
+
+    # 检查两个路径（标准化后的 + 真实路径）是否命中受保护区
+    for check_path in (normalized, real_path):
+        for prefix in _PROTECTED_PATH_PREFIXES:
+            if check_path.startswith(prefix):
+                return True
+        basename = os.path.basename(check_path)
+        if basename in _PROTECTED_FILENAMES:
+            return True
+
+    return False
+
+
+def _split_commands(command: str) -> list:
+    """将复合命令按 ; | && || 分割为子命令列表"""
+    import re
+    # 按 ; | && || 分割（保留分隔符位置）
+    parts = re.split(r'\s*(?:;\s*|\|{1,2}\s*|&&\s*)', command)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _contains_dangerous_command(command: str) -> Optional[str]:
+    """检查命令是否包含危险操作，返回拒绝原因或 None
+    处理命令拼接注入（; | && || 分割后逐个检查）"""
+    if not command:
+        return None
+
+    # 分割复合命令
+    sub_commands = _split_commands(command)
+
+    for sub_cmd in sub_commands:
+        sub_lower = sub_cmd.lower().strip()
+
+        # 1. 检查是否引用了受保护路径
+        for prefix in _PROTECTED_PATH_PREFIXES:
+            if prefix.rstrip("/") in sub_lower:
+                return f"命令包含对受保护路径的访问: {prefix}"
+
+        # 2. 检查受保护文件名
+        for fname in _PROTECTED_FILENAMES:
+            if fname in sub_lower:
+                return f"命令包含对受保护文件的访问: {fname}"
+
+        # 3. 检查安装类命令
+        for pattern in _INSTALL_CMD_PATTERNS:
+            if pattern in sub_lower:
+                return f"禁止安装操作: {pattern}"
+
+    return None
+
+
+def _check_tmp_quota(session_id: Optional[str]) -> Optional[str]:
+    """检查非管理员用户在 /tmp 的磁盘占用是否超限"""
+    import os
+    user_id = _get_user_id_from_session(session_id) if session_id else None
+    if not user_id:
+        return None  # 无法判断用户，放行
+
+    # 检查 /tmp 下该用户的目录
+    user_tmp_dir = f"/tmp/hermes_user_{user_id}"
+    if not os.path.exists(user_tmp_dir):
+        return None  # 目录不存在，无需检查
+
+    # 计算目录总大小（字节）
+    total_size = 0
+    for dirpath, dirnames, filenames in os.walk(user_tmp_dir):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                total_size += os.path.getsize(fp)
+            except OSError:
+                pass
+
+    quota_bytes = _TMP_QUOTA_MB * 1024 * 1024
+    if total_size > quota_bytes:
+        used_mb = total_size / (1024 * 1024)
+        return f"磁盘配额超限: 已使用 {used_mb:.0f}MB / {_TMP_QUOTA_MB}MB，请清理后重试"
+
+    return None
+
+
+def _check_write_file_size(content: Optional[str]) -> Optional[str]:
+    """检查 write_file 的内容大小是否超限"""
+    if not content:
+        return None
+    size_mb = len(content.encode("utf-8")) / (1024 * 1024)
+    if size_mb > _MAX_WRITE_FILE_MB:
+        return f"文件大小超限: {size_mb:.1f}MB / {_MAX_WRITE_FILE_MB}MB"
+    return None
+
+
+def _extract_file_paths_from_args(function_name: str, args: dict) -> list:
+    """从工具参数中提取文件路径"""
+    paths = []
+    if not isinstance(args, dict):
+        return paths
+
+    if function_name in ("read_file", "write_file", "patch"):
+        p = args.get("path", "")
+        if p:
+            paths.append(p)
+
+    elif function_name == "search_files":
+        p = args.get("path", "")
+        if p:
+            paths.append(p)
+
+    elif function_name == "send_message":
+        msg = args.get("message", "")
+        if isinstance(msg, str) and "MEDIA:" in msg:
+            import re
+            media_paths = re.findall(r"MEDIA:(/\S+)", msg)
+            paths.extend(media_paths)
+
+    return paths
+
+
+def _check_admin_permission(
+    function_name: str,
+    session_id: Optional[str],
+    tool_args: Optional[dict] = None,
+) -> Optional[str]:
+    """
+    检查当前用户是否有权限调用指定工具。
+    返回 None 表示允许，返回字符串表示拒绝原因。
+    """
+    # 管理员专属工具 → 直接拦截
+    if function_name in _ADMIN_ONLY_TOOLS:
+        return _deny_if_not_admin(function_name, session_id)
+
+    # 需要路径检查的文件工具
+    if function_name in _PATH_CHECK_TOOLS and tool_args:
+        paths = _extract_file_paths_from_args(function_name, tool_args)
+        for path in paths:
+            if _is_protected_path(path):
+                deny = _deny_if_not_admin(function_name, session_id)
+                if deny:
+                    return f"禁止访问受保护路径: {path}"
+
+    # write_file 额外检查：内容大小 + 磁盘配额
+    if function_name == "write_file" and tool_args:
+        content = tool_args.get("content", "")
+        size_err = _check_write_file_size(content)
+        if size_err:
+            deny = _deny_if_not_admin(function_name, session_id)
+            if deny:
+                return size_err
+
+        quota_err = _check_tmp_quota(session_id)
+        if quota_err:
+            deny = _deny_if_not_admin(function_name, session_id)
+            if deny:
+                return quota_err
+
+    # 需要命令内容检查的执行工具
+    if function_name in _CMD_CHECK_TOOLS and tool_args:
+        command = tool_args.get("command", "") or tool_args.get("code", "")
+        if command:
+            danger = _contains_dangerous_command(command)
+            if danger:
+                deny = _deny_if_not_admin(function_name, session_id)
+                if deny:
+                    return f"{danger}（仅管理员可执行）"
+
+    return None
+
+
+def _get_admin_user_ids() -> set:
+    """从 config.yaml 读取所有平台的管理员 user_id 列表"""
+    admin_ids = set()
+    try:
+        from hermes_constants import get_hermes_home
+        import yaml
+        config_path = get_hermes_home() / "config.yaml"
+        if not config_path.exists():
+            return admin_ids
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        discord_cfg = config.get("discord", {})
+        allow_admin = discord_cfg.get("allow_admin_from", {})
+        for scope_ids in allow_admin.values():
+            if isinstance(scope_ids, list):
+                admin_ids.update(str(uid) for uid in scope_ids)
+    except Exception as exc:
+        logger.debug("Failed to load admin user IDs: %s", exc)
+    return admin_ids
+
+
+def _get_user_id_from_session(session_id: str) -> Optional[str]:
+    """从 SessionStore 数据库查询 session 对应的 user_id"""
+    if not session_id:
+        return None
+    try:
+        from hermes_constants import get_hermes_home
+        import sqlite3
+        db_path = get_hermes_home() / "state.db"
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(str(db_path), timeout=2)
+        try:
+            cursor = conn.execute(
+                "SELECT user_id FROM sessions WHERE id = ?", (session_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row and row[0] else None
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("Failed to get user_id from session %s: %s", session_id, exc)
+        return None
+
+
+def _deny_if_not_admin(function_name: str, session_id: Optional[str]) -> Optional[str]:
+    """内部函数：检查用户是否为管理员，非管理员返回拒绝原因"""
+    if not session_id:
+        return f"工具 '{function_name}' 仅管理员可用，无法验证身份"
+
+    admin_ids = _get_admin_user_ids()
+    if not admin_ids:
+        logger.warning("No admin user IDs configured — skipping permission check for %s", function_name)
+        return None
+
+    user_id = _get_user_id_from_session(session_id)
+    if not user_id:
+        return f"工具 '{function_name}' 仅管理员可用，无法获取用户身份"
+
+    if str(user_id) not in admin_ids:
+        return f"工具 '{function_name}' 仅管理员可用，你的用户ID ({user_id}) 无权限"
+    return None
+
+
+# =============================================================================
 # Async Bridging  (single source of truth -- used by registry.dispatch too)
 # =============================================================================
 
@@ -756,6 +1062,11 @@ def handle_function_call(
     """
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
+
+    # 管理员权限检查：非管理员禁止调用 memory/skill 等敏感工具
+    perm_denied = _check_admin_permission(function_name, session_id, tool_args=function_args)
+    if perm_denied:
+        return json.dumps({"error": perm_denied, "success": False}, ensure_ascii=False)
 
     try:
         if function_name in _AGENT_LOOP_TOOLS:
