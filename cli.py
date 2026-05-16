@@ -855,10 +855,10 @@ def _setup_worktree(repo_root: str = None) -> Optional[Dict[str, str]]:
             capture_output=True, text=True, timeout=30, cwd=repo_root,
         )
         if result.returncode != 0:
-            print(f"\033[31m✗ Failed to create worktree: {result.stderr.strip()}\033[0m")
+            print(f"\033[31m✗ 创建 worktree 失败: {result.stderr.strip()}\033[0m")
             return None
     except Exception as e:
-        print(f"\033[31m✗ Failed to create worktree: {e}\033[0m")
+        print(f"\033[31m✗ 创建 worktree 失败: {e}\033[0m")
         return None
 
     # Copy files listed in .worktreeinclude (gitignored files the agent needs)
@@ -934,7 +934,7 @@ def _setup_worktree(repo_root: str = None) -> Optional[Dict[str, str]]:
         "repo_root": repo_root,
     }
 
-    print(f"\033[32m✓ Worktree created:\033[0m {wt_path}")
+    print(f"\033[32m✓ Worktree 已创建：\033[0m {wt_path}")
     print(f"  Branch: {branch_name}")
 
     return info
@@ -976,8 +976,8 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         has_unpushed = True  # Assume unpushed on error — don't delete
 
     if has_unpushed:
-        print(f"\n\033[33m⚠ Worktree has unpushed commits, keeping: {wt_path}\033[0m")
-        print(f"  To clean up manually: git worktree remove --force {wt_path}")
+        print(f"\n\033[33m⚠ Worktree 有未推送的提交，保留：{wt_path}\033[0m")
+        print(f"  手动清理：git worktree remove --force {wt_path}")
         _active_worktree = None
         return
 
@@ -1001,7 +1001,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         logger.debug("Failed to delete branch %s: %s", branch, e)
 
     _active_worktree = None
-    print(f"\033[32m✓ Worktree cleaned up: {wt_path}\033[0m")
+    print(f"\033[32m✓ Worktree 已清理：{wt_path}\033[0m")
 
 
 def _run_state_db_auto_maintenance(session_db) -> None:
@@ -2691,7 +2691,7 @@ class HermesCLI:
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
-                self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
+                self._console_print(f"[bold red]警告：未知工具集：{', '.join(invalid)}[/]")
         
         # Filesystem checkpoints: CLI flag > config
         cp_cfg = CLI_CONFIG.get("checkpoints", {})
@@ -4132,17 +4132,17 @@ class HermesCLI:
         """Open the active input buffer in an external editor."""
         app = getattr(self, "_app", None)
         if not app:
-            _cprint(f"{_DIM}External editor is only available inside the interactive CLI.{_RST}")
+            _cprint(f"{_DIM}外部编辑器仅在交互式 CLI 中可用。{_RST}")
             return False
         if self._command_running:
-            _cprint(f"{_DIM}Wait for the current command to finish before opening the editor.{_RST}")
+            _cprint(f"{_DIM}请等待当前命令完成后再打开编辑器。{_RST}")
             return False
         if self._sudo_state or self._secret_state or self._approval_state or getattr(self, "_slash_confirm_state", None) or self._clarify_state:
-            _cprint(f"{_DIM}Finish the active prompt before opening the editor.{_RST}")
+            _cprint(f"{_DIM}请先完成当前提示再打开编辑器。{_RST}")
             return False
         target_buffer = buffer or getattr(app, "current_buffer", None)
         if target_buffer is None:
-            _cprint(f"{_DIM}No active input buffer is available for the external editor.{_RST}")
+            _cprint(f"{_DIM}没有可用于外部编辑器的活动输入缓冲区。{_RST}")
             return False
         try:
             existing_text = getattr(target_buffer, "text", "")
@@ -4158,7 +4158,7 @@ class HermesCLI:
             target_buffer.open_in_editor(validate_and_handle=False)
             return True
         except Exception as exc:
-            _cprint(f"{_DIM}Failed to open external editor: {exc}{_RST}")
+            _cprint(f"{_DIM}打开外部编辑器失败：{exc}{_RST}")
             return False
 
     def _ensure_runtime_credentials(self) -> bool:
@@ -4200,7 +4200,7 @@ class HermesCLI:
                             "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
                             _primary_exc, _fb_provider, _fb_model,
                         )
-                        _cprint(f"⚠️  Primary auth failed — switching to fallback: {_fb_provider} / {_fb_model}")
+                        _cprint(f"⚠️  主认证失败 — 正在切换到备用：{_fb_provider} / {_fb_model}")
                         self.requested_provider = _fb_provider
                         self.model = _fb_model
                         _primary_exc = None
@@ -4376,7 +4376,7 @@ class HermesCLI:
         if self._resumed and self._session_db and not self.conversation_history:
             session_meta = self._session_db.get_session(self.session_id)
             if not session_meta:
-                _cprint(f"\033[1;31mSession not found: {self.session_id}{_RST}")
+                _cprint(f"\033[1;31m找不到会话：{self.session_id}{_RST}")
                 _cprint(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}")
                 return False
             # If the requested session is the (empty) head of a compression
@@ -4503,7 +4503,7 @@ class HermesCLI:
                     self.agent._ensure_db_session()
                     if self.agent._session_db_created:
                         self._session_db.set_session_title(self.session_id, self._pending_title)
-                        _cprint(f"  Session title applied: {self._pending_title}")
+                        _cprint(f"  会话标题已应用：{self._pending_title}")
                         self._pending_title = None
                     # else: row creation failed transiently — keep _pending_title for retry
                 except (ValueError, Exception) as e:
@@ -4636,7 +4636,7 @@ class HermesCLI:
         session_meta = self._session_db.get_session(self.session_id)
         if not session_meta:
             self._console_print(
-                f"[bold red]Session not found: {self.session_id}[/]"
+                f"[bold red]找不到会话：{self.session_id}[/]"
             )
             self._console_print(
                 "[dim]Use a session ID from a previous CLI run "
@@ -6110,7 +6110,7 @@ class HermesCLI:
 
         session_meta = self._session_db.get_session(target_id)
         if not session_meta:
-            _cprint(f"  Session not found: {target}")
+            _cprint(f"  找不到会话：{target}")
             _cprint("  Use /history or `hermes sessions list` to see available sessions.")
             return
 
@@ -6396,7 +6396,7 @@ class HermesCLI:
                 }, f, indent=2, ensure_ascii=False)
             print(f"(^_^)v Conversation snapshot saved to: {path}")
             if self.session_id:
-                print(f"       Resume the live session with: hermes --resume {self.session_id}")
+                print(f"       使用以下命令恢复会话：hermes --resume {self.session_id}")
         except Exception as e:
             print(f"(x_x) Failed to save: {e}")
     
@@ -7765,7 +7765,7 @@ class HermesCLI:
                                 if self._session_db.set_session_title(self.session_id, new_title):
                                     _cprint(f"  Session title set: {new_title}")
                                 else:
-                                    _cprint("  Session not found in database.")
+                                    _cprint("  在数据库中找不到会话。")
                             except ValueError as e:
                                 _cprint(f"  {e}")
                         else:
@@ -10974,7 +10974,7 @@ class HermesCLI:
                             # But if it does (race condition), don't interrupt.
                             if self._clarify_state or self._clarify_freetext:
                                 continue
-                            print("\n⚡ New message detected, interrupting...")
+                            print("\n⚡ 检测到新消息，正在中断当前操作...")
                             # Signal TTS to stop on interrupt
                             if stop_event is not None:
                                 stop_event.set()
@@ -11133,7 +11133,7 @@ class HermesCLI:
                 pending_message = result.get("interrupt_message") or interrupt_msg
                 # Add indicator that we were interrupted
                 if response and pending_message:
-                    response = response + "\n\n---\n_[Interrupted - processing new message]_"
+                    response = response + "\n\n---\n_[已中断 — 正在处理新消息]_"
 
             response_previewed = result.get("response_previewed", False) if result else False
 
@@ -12245,7 +12245,7 @@ class HermesCLI:
                     return
                 
                 self._last_ctrl_c_time = now
-                print("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+                print("\n⚡ 正在中断代理...（再次按 Ctrl+C 强制退出）")
                 self.agent.interrupt()
             # If there's text or images, clear them (like bash).
             # If everything is already empty, exit.
@@ -12338,7 +12338,7 @@ class HermesCLI:
                 return
 
             if self._agent_running and self.agent:
-                print("\n⚡ Interrupting agent...")
+                print("\n⚡ 正在中断代理...")
                 self.agent.interrupt()
             elif event.app.current_buffer.text or self._attached_images:
                 event.app.current_buffer.reset()
