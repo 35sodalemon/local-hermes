@@ -2484,7 +2484,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     "⚠️ Unauthorized Discord slash attempt\n"
                     f"User: {user_name} ({user_id})\n"
                     f"Channel: {chan_id} (guild {guild_id})\n"
-                    f"Command: {command_text}\n"
+                    f"命令: {command_text}\n"
                     f"Reason: {reason}"
                 )
                 result = await adapter.send(str(home.chat_id), msg)
@@ -2913,130 +2913,130 @@ class DiscordAdapter(BasePlatformAdapter):
 
         tree = self._client.tree
 
-        @tree.command(name="new", description="Start a new conversation")
+        @tree.command(name="new", description="开始新对话")
         async def slash_new(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/reset", "New conversation started~")
 
-        @tree.command(name="reset", description="Reset your Hermes session")
+        @tree.command(name="reset", description="重置 Hermes 会话")
         async def slash_reset(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/reset", "Session reset~")
 
-        @tree.command(name="model", description="Show or change the model")
-        @discord.app_commands.describe(name="Model name (e.g. anthropic/claude-sonnet-4). Leave empty to see current.")
+        @tree.command(name="model", description="查看或切换模型")
+        @discord.app_commands.describe(name="模型名称（如 anthropic/claude-sonnet-4）。留空查看当前模型。")
         async def slash_model(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/model {name}".strip())
 
-        @tree.command(name="reasoning", description="Show or change reasoning effort")
-        @discord.app_commands.describe(effort="Reasoning effort: none, minimal, low, medium, high, or xhigh.")
+        @tree.command(name="reasoning", description="查看或切换推理深度")
+        @discord.app_commands.describe(effort="推理深度：none、minimal、low、medium、high 或 xhigh。")
         async def slash_reasoning(interaction: discord.Interaction, effort: str = ""):
             await self._run_simple_slash(interaction, f"/reasoning {effort}".strip())
 
-        @tree.command(name="personality", description="Set a personality")
-        @discord.app_commands.describe(name="Personality name. Leave empty to list available.")
+        @tree.command(name="personality", description="设置人格")
+        @discord.app_commands.describe(name="人格名称。留空列出可用人格。")
         async def slash_personality(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/personality {name}".strip())
 
-        @tree.command(name="retry", description="Retry your last message")
+        @tree.command(name="retry", description="重发上一条消息")
         async def slash_retry(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/retry", "Retrying~")
 
-        @tree.command(name="undo", description="Remove the last exchange")
+        @tree.command(name="undo", description="移除最后一条交互")
         async def slash_undo(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/undo")
 
-        @tree.command(name="status", description="Show Hermes session status")
+        @tree.command(name="status", description="显示 Hermes 会话状态")
         async def slash_status(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/status", "Status sent~")
 
-        @tree.command(name="sethome", description="Set this chat as the home channel")
+        @tree.command(name="sethome", description="将此聊天设置为主频道")
         async def slash_sethome(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/sethome")
 
-        @tree.command(name="stop", description="Stop the running Hermes agent")
+        @tree.command(name="stop", description="停止运行中的 Hermes 代理")
         async def slash_stop(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/stop", "Stop requested~")
 
-        @tree.command(name="steer", description="Inject a message after the next tool call (no interrupt)")
-        @discord.app_commands.describe(prompt="Text to inject into the agent's next tool result")
+        @tree.command(name="steer", description="在下次工具调用后注入消息（不中断）")
+        @discord.app_commands.describe(prompt="注入到代理下一次工具调用结果中的文本")
         async def slash_steer(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/steer {prompt}".strip())
 
-        @tree.command(name="compress", description="Compress conversation context")
+        @tree.command(name="compress", description="压缩对话上下文")
         async def slash_compress(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/compress")
 
-        @tree.command(name="title", description="Set or show the session title")
-        @discord.app_commands.describe(name="Session title. Leave empty to show current.")
+        @tree.command(name="title", description="设置或查看会话标题")
+        @discord.app_commands.describe(name="会话标题。留空查看当前标题。")
         async def slash_title(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/title {name}".strip())
 
-        @tree.command(name="resume", description="Resume a previously-named session")
-        @discord.app_commands.describe(name="Session name to resume. Leave empty to list sessions.")
+        @tree.command(name="resume", description="恢复之前命名的会话")
+        @discord.app_commands.describe(name="要恢复的会话名称。留空列出会话。")
         async def slash_resume(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/resume {name}".strip())
 
-        @tree.command(name="usage", description="Show token usage for this session")
+        @tree.command(name="usage", description="显示当前会话的 token 用量")
         async def slash_usage(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/usage")
 
-        @tree.command(name="help", description="Show available commands")
+        @tree.command(name="help", description="显示可用命令")
         async def slash_help(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/help")
 
-        @tree.command(name="insights", description="Show usage insights and analytics")
-        @discord.app_commands.describe(days="Number of days to analyze (default: 7)")
+        @tree.command(name="insights", description="显示使用洞察和分析")
+        @discord.app_commands.describe(days="分析天数（默认：7）")
         async def slash_insights(interaction: discord.Interaction, days: int = 7):
             await self._run_simple_slash(interaction, f"/insights {days}")
 
-        @tree.command(name="reload-mcp", description="Reload MCP servers from config")
+        @tree.command(name="reload-mcp", description="从配置重新加载 MCP 服务器")
         async def slash_reload_mcp(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/reload-mcp")
 
-        @tree.command(name="reload-skills", description="Re-scan ~/.hermes/skills/ for new or removed skills")
+        @tree.command(name="reload-skills", description="重新扫描技能目录")
         async def slash_reload_skills(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/reload-skills")
 
-        @tree.command(name="voice", description="Toggle voice reply mode")
-        @discord.app_commands.describe(mode="Voice mode: join, channel, leave, on, tts, off, or status")
+        @tree.command(name="voice", description="切换语音回复模式")
+        @discord.app_commands.describe(mode="语音模式：join、channel、leave、on、tts、off 或 status")
         @discord.app_commands.choices(mode=[
             # `join` and `channel` both route to _handle_voice_channel_join in
             # gateway/run.py — expose both in the slash UI so autocomplete
             # matches what the docs advertise and what the runner accepts when
             # the command is typed as plain text.
-            discord.app_commands.Choice(name="join — join your voice channel", value="join"),
-            discord.app_commands.Choice(name="channel — join your voice channel (alias)", value="channel"),
-            discord.app_commands.Choice(name="leave — leave voice channel", value="leave"),
-            discord.app_commands.Choice(name="on — voice reply to voice messages", value="on"),
-            discord.app_commands.Choice(name="tts — voice reply to all messages", value="tts"),
-            discord.app_commands.Choice(name="off — text only", value="off"),
-            discord.app_commands.Choice(name="status — show current mode", value="status"),
+            discord.app_commands.Choice(name="join — 加入你的语音频道", value="join"),
+            discord.app_commands.Choice(name="channel — 加入语音频道（别名）", value="channel"),
+            discord.app_commands.Choice(name="leave — 离开语音频道", value="leave"),
+            discord.app_commands.Choice(name="on — 语音回复语音消息", value="on"),
+            discord.app_commands.Choice(name="tts — 语音回复所有消息", value="tts"),
+            discord.app_commands.Choice(name="off — 仅文字", value="off"),
+            discord.app_commands.Choice(name="status — 显示当前模式", value="status"),
         ])
         async def slash_voice(interaction: discord.Interaction, mode: str = ""):
             await self._run_simple_slash(interaction, f"/voice {mode}".strip())
 
-        @tree.command(name="update", description="Update Hermes Agent to the latest version")
+        @tree.command(name="update", description="更新 Hermes Agent 到最新版本")
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
 
-        @tree.command(name="restart", description="Gracefully restart the Hermes gateway")
+        @tree.command(name="restart", description="优雅地重启 Hermes 网关")
         async def slash_restart(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/restart", "Restart requested~")
 
-        @tree.command(name="approve", description="Approve a pending dangerous command")
-        @discord.app_commands.describe(scope="Optional: 'all', 'session', 'always', 'all session', 'all always'")
+        @tree.command(name="approve", description="批准待处理的危险命令")
+        @discord.app_commands.describe(scope="可选：'all'、'session'、'always'、'all session'、'all always'")
         async def slash_approve(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/approve {scope}".strip())
 
-        @tree.command(name="deny", description="Deny a pending dangerous command")
-        @discord.app_commands.describe(scope="Optional: 'all' to deny all pending commands")
+        @tree.command(name="deny", description="拒绝待处理的危险命令")
+        @discord.app_commands.describe(scope="可选：'all' 拒绝所有待处理命令")
         async def slash_deny(interaction: discord.Interaction, scope: str = ""):
             await self._run_simple_slash(interaction, f"/deny {scope}".strip())
 
-        @tree.command(name="thread", description="Create a new thread and start a Hermes session in it")
+        @tree.command(name="thread", description="创建新线程并启动 Hermes 会话")
         @discord.app_commands.describe(
-            name="Thread name",
-            message="Optional first message to send to Hermes in the thread",
-            auto_archive_duration="Auto-archive in minutes (60, 1440, 4320, 10080)",
+            name="线程名称",
+            message="可选：在线程中发送给 Hermes 的第一条消息",
+            auto_archive_duration="自动归档时间（分钟）：60、1440、4320、10080",
         )
         async def slash_thread(
             interaction: discord.Interaction,
@@ -3048,13 +3048,13 @@ class DiscordAdapter(BasePlatformAdapter):
             # so a rejected invoker can receive an ephemeral rejection.
             await self._handle_thread_create_slash(interaction, name, message, auto_archive_duration)
 
-        @tree.command(name="queue", description="Queue a prompt for the next turn (doesn't interrupt)")
-        @discord.app_commands.describe(prompt="The prompt to queue")
+        @tree.command(name="queue", description="将提示排队到下一轮（不中断）")
+        @discord.app_commands.describe(prompt="要排队的提示")
         async def slash_queue(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/queue {prompt}", "Queued for the next turn.")
 
-        @tree.command(name="background", description="Run a prompt in the background")
-        @discord.app_commands.describe(prompt="The prompt to run in the background")
+        @tree.command(name="background", description="在后台运行提示")
+        @discord.app_commands.describe(prompt="要在后台运行的提示")
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
@@ -3334,7 +3334,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             cmd = discord.app_commands.Command(
                 name="skill",
-                description="Run a Hermes skill",
+                description="运行 Hermes 技能",
                 callback=_skill_handler,
             )
             tree.add_command(cmd)
@@ -3979,11 +3979,11 @@ class DiscordAdapter(BasePlatformAdapter):
             max_desc = 4088
             cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
             embed = discord.Embed(
-                title="⚠️ Command Approval Required",
+                title="⚠️ 需要批准命令",
                 description=f"```\n{cmd_display}\n```",
                 color=discord.Color.orange(),
             )
-            embed.add_field(name="Reason", value=description, inline=False)
+            embed.add_field(name="原因", value=description, inline=False)
 
             view = ExecApprovalView(
                 session_key=session_key,
@@ -4182,7 +4182,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 provider_label = current_provider
 
             embed = discord.Embed(
-                title="⚙ Model Configuration",
+                title="⚙ 模型配置",
                 description=(
                     f"Current model: `{current_model or 'unknown'}`\n"
                     f"Provider: {provider_label}\n\n"
@@ -4958,21 +4958,21 @@ if DISCORD_AVAILABLE:
         async def allow_once(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+            await self._resolve(interaction, "once", discord.Color.green(), "已批准一次")
 
         @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
         async def allow_session(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
+            await self._resolve(interaction, "session", discord.Color.blue(), "已批准（当前会话）")
 
         @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
         async def allow_always(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
-            await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
+            await self._resolve(interaction, "always", discord.Color.purple(), "已永久批准")
 
-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="拒绝", style=discord.ButtonStyle.red)
         async def deny(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
@@ -5065,11 +5065,11 @@ if DISCORD_AVAILABLE:
             except Exception as exc:
                 logger.error("Discord slash-confirm resolve failed: %s", exc, exc_info=True)
 
-        @discord.ui.button(label="Approve Once", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="批准一次", style=discord.ButtonStyle.green)
         async def approve_once(
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+            await self._resolve(interaction, "once", discord.Color.green(), "已批准一次")
 
         @discord.ui.button(label="Always Approve", style=discord.ButtonStyle.blurple)
         async def approve_always(
@@ -5077,11 +5077,11 @@ if DISCORD_AVAILABLE:
         ):
             await self._resolve(interaction, "always", discord.Color.purple(), "Always approved")
 
-        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+        @discord.ui.button(label="取消", style=discord.ButtonStyle.red)
         async def cancel(
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
-            await self._resolve(interaction, "cancel", discord.Color.greyple(), "Cancelled")
+            await self._resolve(interaction, "cancel", discord.Color.greyple(), "已取消")
 
         async def on_timeout(self):
             self.resolved = True
@@ -5236,7 +5236,7 @@ if DISCORD_AVAILABLE:
             self.add_item(select)
 
             cancel_btn = discord.ui.Button(
-                label="Cancel", style=discord.ButtonStyle.red, custom_id="model_cancel"
+                label="取消", style=discord.ButtonStyle.red, custom_id="model_cancel"
             )
             cancel_btn.callback = self._on_cancel
             self.add_item(cancel_btn)
@@ -5278,7 +5278,7 @@ if DISCORD_AVAILABLE:
             self.add_item(back_btn)
 
             cancel_btn = discord.ui.Button(
-                label="Cancel", style=discord.ButtonStyle.red, custom_id="model_cancel2"
+                label="取消", style=discord.ButtonStyle.red, custom_id="model_cancel2"
             )
             cancel_btn.callback = self._on_cancel
             self.add_item(cancel_btn)
@@ -5305,7 +5305,7 @@ if DISCORD_AVAILABLE:
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
+                    title="⚙ 模型配置",
                     description=f"Provider: **{pname}**\nSelect a model:{extra}",
                     color=discord.Color.blue(),
                 ),
@@ -5329,7 +5329,7 @@ if DISCORD_AVAILABLE:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Switching Model",
+                    title="⚙ 正在切换模型",
                     description=f"Switching to `{model_id}`...",
                     color=discord.Color.blue(),
                 ),
@@ -5347,7 +5347,7 @@ if DISCORD_AVAILABLE:
 
             await interaction.edit_original_response(
                 embed=discord.Embed(
-                    title="⚙ Model Switched",
+                    title="⚙ 模型已切换",
                     description=result_text,
                     color=discord.Color.green(),
                 ),
@@ -5371,7 +5371,7 @@ if DISCORD_AVAILABLE:
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
+                    title="⚙ 模型配置",
                     description=(
                         f"Current model: `{self.current_model or 'unknown'}`\n"
                         f"Provider: {provider_label}\n\n"
@@ -5387,8 +5387,8 @@ if DISCORD_AVAILABLE:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
-                    description="Model selection cancelled.",
+                    title="⚙ 模型配置",
+                    description="模型选择已取消。",
                     color=discord.Color.greyple(),
                 ),
                 view=self,
