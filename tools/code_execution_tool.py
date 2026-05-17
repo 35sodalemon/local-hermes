@@ -1754,6 +1754,11 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
                     ),
                 },
             },
+                "host": {
+                    "type": "boolean",
+                    "description": "管理员在子区内使用：true 表示直接在宿主机执行（跳出沙盒）。仅管理员有效，非管理员忽略此参数。",
+                    "default": False,
+                },
             "required": ["code"],
         },
     }
@@ -1771,11 +1776,83 @@ registry.register(
     name="execute_code",
     toolset="code_execution",
     schema=EXECUTE_CODE_SCHEMA,
-    handler=lambda args, **kw: execute_code(
-        code=args.get("code", ""),
-        task_id=kw.get("task_id"),
-        enabled_tools=kw.get("enabled_tools")),
+    handler=lambda args, **kw: _handle_execute_code_sandbox(args, **kw),
     check_fn=check_sandbox_requirements,
     emoji="🐍",
     max_result_size_chars=100_000,
 )
+
+
+def _handle_execute_code_sandbox(args, **kw):
+    """execute_code 入口：DM 中管理员直接执行，子区内默认所有人走沙盒"""
+    session_id = kw.get("session_id")
+    if session_id:
+        try:
+            from tools.sandbox_manager import sandbox_manager
+            from model_tools import _get_user_id_from_session, _get_admin_user_ids
+
+            user_id = _get_user_id_from_session(session_id)
+            admin_ids = _get_admin_user_ids()
+            is_admin = user_id and str(user_id) in admin_ids
+            # 判断是否在子区中：检查 HERMES_SESSION_THREAD_ID
+            from gateway.session_context import get_session_env
+            _thread_id_env = get_session_env('HERMES_SESSION_THREAD_ID', '')
+            is_thread = bool(_thread_id_env)
+
+            # 判断是否走沙盒：
+            # - DM 中：管理员直接执行，非管理员走沙盒
+            # - 子区中：默认所有人走沙盒，管理员可用 host=true 跳出
+            use_sandbox = False
+            if is_thread:
+                # 子区内：默认走沙盒，管理员可用 host=true 跳出
+                if is_admin and args.get("host", False):
+                    use_sandbox = False  # 管理员主动跳出沙盒
+                else:
+                    use_sandbox = True   # 所有人默认走沙盒
+            else:
+                # DM 中：非管理员走沙盒，管理员直接执行
+                if not is_admin:
+                    use_sandbox = True
+
+            if use_sandbox:
+                code = args.get("code", "")
+                if not code:
+                    return json.dumps({"error": "No code provided", "success": False})
+
+                # 提取 thread_id（用于同线程共享沙盒）
+                _thread_id = None
+                if is_thread:
+                    _thread_id = session_id.split(':')[-1]
+
+                # 检查是否是新建沙盒
+                is_new = str(user_id) not in sandbox_manager._user_sandboxes
+                result = sandbox_manager.get_or_create(str(user_id), thread_id=_thread_id)
+                if not result:
+                    return json.dumps({"error": "无法创建沙盒容器", "success": False})
+
+                exec_result = sandbox_manager.execute_python(str(user_id), code, timeout=60)
+
+                # 构建输出：沙盒状态标记在最前面
+                output = exec_result.get("stdout", "")
+                label = exec_result.get("label", "")
+                if is_new:
+                    prefix = f"[🐳{label} 沙盒已创建]\n" if label else "[🐳 沙盒已创建]\n"
+                else:
+                    prefix = f"[🐳{label}]\n" if label else "[🐳]\n"
+
+                return json.dumps({
+                    "output": f"{prefix}{output}" if output else prefix.rstrip("\n"),
+                    "exit_code": exec_result.get("exit_code", -1),
+                    "error": exec_result.get("stderr", ""),
+                    "sandbox": True,
+                    "label": label,
+                }, ensure_ascii=False)
+        except ImportError:
+            pass  # 沙盒模块未安装，走正常路径
+
+    # 管理员或沙盒不可用 → 直接执行
+    return execute_code(
+        code=args.get("code", ""),
+        task_id=kw.get("task_id"),
+        enabled_tools=kw.get("enabled_tools"),
+    )

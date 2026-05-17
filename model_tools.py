@@ -233,8 +233,41 @@ def _check_admin_permission(
 ) -> Optional[str]:
     """
     检查当前用户是否有权限调用指定工具。
+    权限验证仅在 Discord 端生效，其他端（CLI/Telegram/微信等）直接放行。
     返回 None 表示允许，返回字符串表示拒绝原因。
     """
+    # 权限验证仅对 Discord 端生效，其他端直接放行
+    is_discord = False
+    if session_id:
+        try:
+            from hermes_constants import get_hermes_home
+            import sqlite3
+            db_path = get_hermes_home() / "state.db"
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path), timeout=2)
+                try:
+                    cursor = conn.execute("SELECT source FROM sessions WHERE id = ?", (session_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        is_discord = (row[0] == 'discord')
+                finally:
+                    conn.close()
+        except Exception:
+            pass  # 查询失败则不进行权限检查（放行）
+
+    # 非 Discord 端：不做任何权限检查，直接放行
+    if not is_discord:
+        return None
+
+    # === 以下仅 Discord 端生效 ===
+
+    # 管理员不受任何限制
+    if session_id:
+        user_id = _get_user_id_from_session(session_id)
+        admin_ids = _get_admin_user_ids()
+        if user_id and str(user_id) in admin_ids:
+            return None  # 管理员直接放行
+
     # 管理员专属工具 → 直接拦截
     if function_name in _ADMIN_ONLY_TOOLS:
         return _deny_if_not_admin(function_name, session_id)
@@ -1124,12 +1157,14 @@ def handle_function_call(
                 function_name, function_args,
                 task_id=task_id,
                 enabled_tools=sandbox_enabled,
+                session_id=session_id,
             )
         else:
             result = registry.dispatch(
                 function_name, function_args,
                 task_id=task_id,
                 user_task=user_task,
+                session_id=session_id,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
 

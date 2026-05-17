@@ -1401,6 +1401,14 @@ def cleanup_all_environments():
         except OSError as e:
             logger.debug("Failed to remove orphaned path %s: %s", path, e)
     
+    # 清理 Docker 沙盒
+    try:
+        from tools.sandbox_manager import sandbox_manager
+        sandbox_manager.cleanup_all()
+        logger.info("All Docker sandboxes cleaned up")
+    except Exception as e:
+        logger.debug("Sandbox cleanup error: %s", e)
+    
     if cleaned > 0:
         logger.info("Cleaned %d environments", cleaned)
     return cleaned
@@ -2340,6 +2348,11 @@ TERMINAL_SCHEMA = {
                 "description": "When true (and background=true), you'll be automatically notified exactly once when the process finishes. **This is the right choice for almost every long-running task** — tests, builds, deployments, multi-item batch jobs, anything that takes over a minute and has a defined end. Use this and keep working on other things; the system notifies you on exit. MUTUALLY EXCLUSIVE with watch_patterns — when both are set, watch_patterns is dropped.",
                 "default": False
             },
+            "host": {
+                "type": "boolean",
+                "description": "管理员在子区内使用：true 表示直接在宿主机执行（跳出沙盒）。仅管理员有效，非管理员忽略此参数。",
+                "default": False
+            },
             "watch_patterns": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -2352,6 +2365,72 @@ TERMINAL_SCHEMA = {
 
 
 def _handle_terminal(args, **kw):
+    # 检查是否需要走沙盒
+    session_id = kw.get("session_id")
+    if session_id:
+        try:
+            from tools.sandbox_manager import sandbox_manager
+            from model_tools import _get_user_id_from_session, _get_admin_user_ids
+
+            user_id = _get_user_id_from_session(session_id)
+            admin_ids = _get_admin_user_ids()
+            is_admin = user_id and str(user_id) in admin_ids
+            # 判断是否在子区中：检查 HERMES_SESSION_THREAD_ID
+            from gateway.session_context import get_session_env
+            _thread_id_env = get_session_env('HERMES_SESSION_THREAD_ID', '')
+            is_thread = bool(_thread_id_env)
+
+            # 判断是否走沙盒：
+            # - DM 中：管理员直接执行，非管理员走沙盒
+            # - 子区中：默认所有人走沙盒，管理员可用 host=true 跳出
+            use_sandbox = False
+            if is_thread:
+                # 子区内：默认走沙盒，管理员可用 host=true 跳出
+                if is_admin and args.get("host", False):
+                    use_sandbox = False  # 管理员主动跳出沙盒
+                else:
+                    use_sandbox = True   # 所有人默认走沙盒
+            else:
+                # DM 中：非管理员走沙盒，管理员直接执行
+                if not is_admin:
+                    use_sandbox = True
+
+            if use_sandbox:
+                command = args.get("command", "")
+                if not command:
+                    return json.dumps({"error": "No command provided", "success": False})
+
+                # 提取 thread_id（用于同线程共享沙盒）
+                _thread_id = None
+                if is_thread:
+                    _thread_id = session_id.split(':')[-1]
+
+                # 检查是否是新建沙盒（用户之前没有沙盒）
+                is_new = str(user_id) not in sandbox_manager._user_sandboxes
+                result = sandbox_manager.get_or_create(str(user_id), thread_id=_thread_id)
+                if not result:
+                    return json.dumps({"error": "无法创建沙盒容器", "success": False})
+
+                exec_result = sandbox_manager.execute(str(user_id), command, timeout=args.get("timeout", 60))
+
+                # 构建输出：沙盒状态标记在最前面
+                output = exec_result.get("stdout", "")
+                label = exec_result.get("label", "")
+                if is_new:
+                    prefix = f"[🐳{label} 沙盒已创建]\n" if label else "[🐳 沙盒已创建]\n"
+                else:
+                    prefix = f"[🐳{label}]\n" if label else "[🐳]\n"
+
+                return json.dumps({
+                    "output": f"{prefix}{output}" if output else prefix.rstrip("\n"),
+                    "exit_code": exec_result.get("exit_code", -1),
+                    "error": exec_result.get("stderr", ""),
+                    "sandbox": True,
+                    "label": label,
+                }, ensure_ascii=False)
+        except ImportError:
+            pass  # 沙盒模块未安装，走正常路径
+
     return terminal_tool(
         command=args.get("command"),
         background=args.get("background", False),
