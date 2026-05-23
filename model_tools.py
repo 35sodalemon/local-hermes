@@ -320,11 +320,21 @@ def _get_admin_user_ids() -> set:
             return admin_ids
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
-        discord_cfg = config.get("discord", {})
-        allow_admin = discord_cfg.get("allow_admin_from", {})
-        for scope_ids in allow_admin.values():
-            if isinstance(scope_ids, list):
-                admin_ids.update(str(uid) for uid in scope_ids)
+
+        # 1. 读取 platforms.discord.extra.allow_admin_from
+        platforms_cfg = config.get("platforms", {})
+        discord_extra = platforms_cfg.get("discord", {}).get("extra", {})
+        allow_admin = discord_extra.get("allow_admin_from", [])
+        if isinstance(allow_admin, list):
+            admin_ids.update(str(uid) for uid in allow_admin)
+
+        # 2. 读取 gateway.discord.allowed_users（备用来源）
+        gateway_cfg = config.get("gateway", {})
+        gateway_discord = gateway_cfg.get("discord", {})
+        allowed_users = gateway_discord.get("allowed_users", [])
+        if isinstance(allowed_users, list):
+            admin_ids.update(str(uid) for uid in allowed_users)
+
     except Exception as exc:
         logger.debug("Failed to load admin user IDs: %s", exc)
     return admin_ids

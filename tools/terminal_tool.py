@@ -2381,19 +2381,9 @@ def _handle_terminal(args, **kw):
             is_thread = bool(_thread_id_env)
 
             # 判断是否走沙盒：
-            # - DM 中：管理员直接执行，非管理员走沙盒
-            # - 子区中：默认所有人走沙盒，管理员可用 host=true 跳出
-            use_sandbox = False
-            if is_thread:
-                # 子区内：默认走沙盒，管理员可用 host=true 跳出
-                if is_admin and args.get("host", False):
-                    use_sandbox = False  # 管理员主动跳出沙盒
-                else:
-                    use_sandbox = True   # 所有人默认走沙盒
-            else:
-                # DM 中：非管理员走沙盒，管理员直接执行
-                if not is_admin:
-                    use_sandbox = True
+            # - 管理员：无论 DM 还是子区，直接在宿主机执行
+            # - 非管理员：走 Docker 沙盒
+            use_sandbox = False if is_admin else True
 
             if use_sandbox:
                 command = args.get("command", "")
