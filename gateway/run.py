@@ -8474,37 +8474,6 @@ class GatewayRunner:
                 )
             agent_messages = agent_result.get("messages", [])
             
-            # 检查工具输出是否有沙盒标记，如果有就加在回复开头
-            _sandbox_prefix = ""
-            # 只检查当前turn的新消息，不检查历史消息
-            _history_len = agent_result.get("history_offset", len(history))
-            _new_messages = agent_messages[_history_len:] if len(agent_messages) > _history_len else []
-            for msg in _new_messages:
-                if msg.get("role") == "tool":
-                    try:
-                        tool_content = msg.get("content", "")
-                        # P5修复: 处理 content 可能是 dict 的情况
-                        if isinstance(tool_content, dict):
-                            tool_output = tool_content.get("output", "")
-                        elif isinstance(tool_content, str):
-                            tool_data = json.loads(tool_content)
-                            tool_output = tool_data.get("output", "")
-                        else:
-                            continue
-                        # 匹配新的沙盒标记格式：[🐳a 沙盒已创建] 或 [🐳a]
-                        match = re.match(r'(\[🐳[a-z]?(?: 沙盒已创建)?\])', tool_output)
-                        if match:
-                            _sandbox_prefix = match.group(1)
-                            break
-                    except json.JSONDecodeError:
-                        logger.debug("Failed to parse tool content as JSON")
-                    except Exception as e:
-                        logger.debug("Sandbox prefix detection error: %s", e)
-            
-            # 如果有沙盒标记，加在回复开头
-            if _sandbox_prefix and response and not response.startswith("[🐳"):
-                response = f"{_sandbox_prefix}\n---\n{response}"
-            
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
