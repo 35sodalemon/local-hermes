@@ -187,7 +187,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
         if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
             _elapsed = time.time() - _call_start
             agent._touch_activity(
-                f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
+                f"正在等待非流式响应（已等待 {int(_elapsed)}s）"
             )
 
         # Stale-call detector: kill the connection if no response
@@ -202,9 +202,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
             )
             agent._emit_status(
-                f"⚠️ No response from provider for {int(_elapsed)}s "
-                f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
-                f"Aborting call."
+                f"⚠️ 供应商 {int(_elapsed)}s 无响应 "
+                f"（非流式，模型: {api_kwargs.get('model', 'unknown')}）。"
+                f"正在中止调用。"
             )
             try:
                 if agent.api_mode == "anthropic_messages":
@@ -215,14 +215,14 @@ def interruptible_api_call(agent, api_kwargs: dict):
             except Exception:
                 pass
             agent._touch_activity(
-                f"stale non-streaming call killed after {int(_elapsed)}s"
+                f"陈旧的非流式调用在 {int(_elapsed)}s 后被终止"
             )
             # Wait briefly for the thread to notice the closed connection.
             t.join(timeout=2.0)
             if result["error"] is None and result["response"] is None:
                 result["error"] = TimeoutError(
-                    f"Non-streaming API call timed out after {int(_elapsed)}s "
-                    f"with no response (threshold: {int(_stale_timeout)}s)"
+                    f"非流式 API 调用超时，{int(_elapsed)}s 无响应"
+                    f"（阈值: {int(_stale_timeout)}s）"
                 )
             break
 
@@ -908,8 +908,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             )
 
         agent._emit_status(
-            f"🔄 Primary model failed — switching to fallback: "
-            f"{fb_model} via {fb_provider}"
+            f"🔄 主模型失败 — 正在切换到备用方案: "
+            f"{fb_model}（通过 {fb_provider}）"
         )
         logging.info(
             "Fallback activated: %s → %s (%s)",
@@ -917,14 +917,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         )
         return True
     except Exception as e:
-        logging.error("Failed to activate fallback %s: %s", fb_model, e)
+        logging.error("激活备用方案失败 %s: %s", fb_model, e)
         return agent._try_activate_fallback()  # try next in chain
 
 
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
-    print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
+    print(f"⚠️  已达到最大迭代次数（{agent.max_iterations}）。正在请求摘要...")
 
     summary_request = (
         "You've reached the maximum number of tool-calling iterations allowed. "
@@ -1133,8 +1133,8 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 final_response = "I reached the iteration limit and couldn't generate a summary."
 
     except Exception as e:
-        logging.warning(f"Failed to get summary response: {e}")
-        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+        logging.warning(f"获取摘要响应失败: {e}")
+        final_response = f"已达到最大迭代次数（{agent.max_iterations}）但无法生成摘要。错误: {str(e)}"
 
     return final_response
 
@@ -1155,19 +1155,19 @@ def cleanup_task_resources(agent, task_id: str) -> None:
         if is_persistent_env(task_id):
             if agent.verbose_logging:
                 logging.debug(
-                    f"Skipping per-turn cleanup_vm for persistent env {task_id}; "
-                    f"idle reaper will handle it."
+                    f"跳过持久环境 {task_id} 的每轮清理；"
+                    f"空闲回收器会处理它。"
                 )
         else:
             _ra().cleanup_vm(task_id)
     except Exception as e:
         if agent.verbose_logging:
-            logging.warning(f"Failed to cleanup VM for task {task_id}: {e}")
+            logging.warning(f"清理任务 {task_id} 的 VM 失败: {e}")
     try:
         _ra().cleanup_browser(task_id)
     except Exception as e:
         if agent.verbose_logging:
-            logging.warning(f"Failed to cleanup browser for task {task_id}: {e}")
+            logging.warning(f"清理任务 {task_id} 的浏览器失败: {e}")
 
 
 
@@ -1967,7 +1967,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             _last_heartbeat = _hb_now
             _waiting_secs = int(_hb_now - last_chunk_time["t"])
             agent._touch_activity(
-                f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
+                f"正在等待流响应（{_waiting_secs}s，暂无数据块）"
             )
 
         # Detect stale streams: connections kept alive by SSE pings
@@ -1983,10 +1983,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
             )
             agent._emit_status(
-                f"⚠️ No response from provider for {int(_stale_elapsed)}s "
-                f"(model: {api_kwargs.get('model', 'unknown')}, "
-                f"context: ~{_est_ctx:,} tokens). "
-                f"Reconnecting..."
+                f"⚠️ 供应商 {int(_stale_elapsed)}s 无响应 "
+                f"（模型: {api_kwargs.get('model', 'unknown')}，"
+                f"上下文: ~{_est_ctx:,} tokens）。"
+                f"正在重连..."
             )
             try:
                 _close_request_client_once("stale_stream_kill")
@@ -2002,7 +2002,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # the inner thread processes the closure.
             last_chunk_time["t"] = time.time()
             agent._touch_activity(
-                f"stale stream detected after {int(_stale_elapsed)}s, reconnecting"
+                f"检测到陈旧流（{int(_stale_elapsed)}s），正在重连"
             )
 
         if agent._interrupt_requested:
@@ -2043,9 +2043,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 if len(_partial_names) > 3:
                     _name_str += f", +{len(_partial_names) - 3} more"
                 _warn = (
-                    f"\n\n⚠ Stream stalled mid tool-call "
-                    f"({_name_str}); the action was not executed. "
-                    f"Ask me to retry if you want to continue."
+                    f"\n\n⚠ 流在工具调用中途停滞 "
+                    f"（{_name_str}）；操作未执行。"
+                    f"请让我重试以继续。"
                 )
                 _partial_text = (_partial_text or "") + _warn
                 # Also fire as a streaming delta so the user sees it now
