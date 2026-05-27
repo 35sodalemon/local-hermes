@@ -409,10 +409,21 @@ def prefetch_update_check():
     t.start()
 
 
-def get_update_result(timeout: float = 0.5) -> Optional[int]:
+def get_update_result(timeout: float = 2.0) -> Optional[int]:
     """Get result of prefetched check. Returns None if not ready."""
     _update_check_done.wait(timeout=timeout)
-    return _update_result
+    if _update_result is not None:
+        return _update_result
+    # 后台线程超时未完成（如 git fetch 慢），直接读缓存兜底
+    try:
+        import json as _json
+        cache_file = get_hermes_home() / ".update_check"
+        if cache_file.exists():
+            cached = _json.loads(cache_file.read_text())
+            return cached.get("behind")
+    except Exception:
+        pass
+    return None
 
 
 # =========================================================================
