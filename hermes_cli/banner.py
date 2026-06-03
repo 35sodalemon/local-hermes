@@ -113,8 +113,8 @@ def get_available_skills() -> Dict[str, List[str]]:
 # Update check
 # =========================================================================
 
-# Cache update check results for 6 hours to avoid repeated git fetches
-_UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
+# Cache update check results for 30 minutes to avoid repeated git fetches
+_UPDATE_CHECK_CACHE_SECONDS = 30 * 60
 
 # Sentinel returned when we know an update exists but can't count commits
 # (e.g. nix-built hermes — no local git history to count against).

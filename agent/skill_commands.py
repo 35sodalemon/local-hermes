@@ -297,7 +297,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     # Respect user's disabled skills config
                     if name in disabled:
                         continue
-                    description = frontmatter.get('description', '')
+                    description = frontmatter.get('description_zh', '') or frontmatter.get('description', '')
                     if not description:
                         for line in body.strip().split('\n'):
                             line = line.strip()

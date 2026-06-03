@@ -63,7 +63,7 @@ class CommandDef:
 
 COMMAND_REGISTRY: list[CommandDef] = [
     # Session
-    CommandDef("start", "Acknowledge platform start pings without a reply", "Session",
+    CommandDef("start", "响应平台启动信号（不回复）", "会话",
                gateway_only=True),
     CommandDef("new", "开始新会话（新 session ID + 历史）", "会话",
                aliases=("reset",), args_hint="[name]"),
@@ -125,8 +125,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("model", "为当前会话切换模型", "配置",
                aliases=("provider",), args_hint="[model] [--provider name] [--global] [--refresh]"),
-    CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
-               "Configuration", aliases=("codex_runtime",),
+    CommandDef("codex-runtime", "切换 Codex 应用服务器运行时（用于 OpenAI/Codex 模型）",
+               "配置", aliases=("codex_runtime",),
                args_hint="[auto|codex_app_server]"),
     CommandDef("gquota", "显示 Google Gemini Code Assist 配额使用情况", "信息",
                cli_only=True),
@@ -179,10 +179,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                             "heartbeat", "assignees", "context", "specify", "gc")),
     CommandDef("reload", "将 .env 变量重新加载到当前会话", "工具与技能",
                cli_only=True),
-    CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
+    CommandDef("reload-mcp", "重新加载 MCP 服务器配置", "配置",
                aliases=("reload_mcp",)),
-    CommandDef("reload-skills", "Re-scan ~/.hermes/skills/ for newly installed or removed skills",
-               "Tools & Skills", aliases=("reload_skills",)),
+    CommandDef("reload-skills", "重新扫描技能目录，同步安装/卸载状态",
+               "工具与技能", aliases=("reload_skills",)),
     CommandDef("browser", "通过 CDP 连接浏览器工具到你的 Chromium 浏览器", "工具与技能",
                cli_only=True, args_hint="[connect|disconnect|status]",
                subcommands=("connect", "disconnect", "status")),
