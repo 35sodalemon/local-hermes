@@ -152,10 +152,26 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
 
 
 def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+    """Count commits behind upstream/main or origin/main in a local checkout.
+
+    优先检查 upstream（如果存在），这样 fork 用户能看到落后官方仓库多少 commit。
+    """
+    # 确定要检查的远程仓库：优先 upstream，否则 origin
+    remote = "upstream"
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "upstream"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode != 0:
+            remote = "origin"
+    except Exception:
+        remote = "origin"
+
     try:
         subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
+            ["git", "fetch", remote, "--quiet"],
             capture_output=True, timeout=10,
             cwd=str(repo_dir),
         )
@@ -164,7 +180,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
 
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            ["git", "rev-list", "--count", f"HEAD..{remote}/main"],
             capture_output=True, text=True, timeout=5,
             cwd=str(repo_dir),
         )
