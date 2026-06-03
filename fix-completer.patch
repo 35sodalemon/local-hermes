@@ -1,0 +1,14 @@
+*** Begin Patch
+*** Update File: hermes_cli/commands.py
+@@ def __init__ @@
+     def __init__(
+         self,
+         skill_commands_provider: Callable[[], Mapping[str, dict[str, Any]]] | None = None,
+         command_filter: Callable[[str], bool] | None = None,
++        skill_bundles_provider: Callable[[], dict] | None = None,
+     ) -> None:
+         self._skill_commands_provider = skill_commands_provider
+         self._command_filter = command_filter
++        self._skill_bundles_provider = skill_bundles_provider
+         # Cached project file list for fuzzy @ completions
+*** End Patch
