@@ -22,6 +22,7 @@ TIPS = [
     "/retry 重新发送上一条消息 — 当 agent 的回答不太对时很有用。",
     "/verbose 循环切换工具进度显示：关 → 新工具 → 全部 → 详细。",
     "/reasoning high 提高模型思考深度。/reasoning show 显示推理过程。",
+    "/reasoning low 或 /reasoning minimal 将思考深度降低到默认（medium）以下 — 更快、更便宜的响应。",
     "/fast 切换优先处理模式，获得更快的 API 响应（取决于提供商）。",
     "/yolo 跳过当前会话剩余时间内的所有危险命令审批提示。",
     "/model 可以在会话中途切换模型 — 试试 /model sonnet 或 /model gpt-5。",

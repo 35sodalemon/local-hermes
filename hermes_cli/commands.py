@@ -86,7 +86,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("branch", "分叉当前会话（探索不同路径）", "会话",
                aliases=("fork",), args_hint="[name]"),
     CommandDef("compress", "手动压缩对话上下文", "会话",
-               args_hint="[focus topic]"),
+               args_hint="[here [N] | focus topic]"),
     CommandDef("rollback", "列出或恢复文件系统检查点", "会话",
                args_hint="[number]"),
     CommandDef("snapshot", "创建或恢复 Hermes 配置/状态快照", "会话",
