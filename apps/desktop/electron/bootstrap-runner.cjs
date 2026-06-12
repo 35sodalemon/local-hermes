@@ -40,6 +40,15 @@ const path = require('node:path')
 const https = require('node:https')
 const { spawn } = require('node:child_process')
 
+const IS_WINDOWS = process.platform === 'win32'
+
+function hiddenWindowsChildOptions(options = {}) {
+  if (!IS_WINDOWS || Object.prototype.hasOwnProperty.call(options, 'windowsHide')) {
+    return options
+  }
+  return { ...options, windowsHide: true }
+}
+
 const STAMP_COMMIT_RE = /^[0-9a-f]{7,40}$/i
 
 // Stages flagged needs_user_input=true in the manifest are skipped by the
@@ -74,6 +83,21 @@ function resolveLocalInstallScript(sourceRepoRoot) {
 
 function bootstrapCacheDir(hermesHome) {
   return path.join(hermesHome, 'bootstrap-cache')
+}
+
+// The install.sh / install.ps1 that ships inside the already-installed agent
+// checkout under ~/.hermes/hermes-agent. Used as a last-resort fallback when
+// the pinned commit can't be fetched from GitHub (e.g. a locally-built desktop
+// app stamped to an unpushed HEAD).
+function installedAgentInstallScript(hermesHome) {
+  if (!hermesHome) return null
+  const candidate = path.join(hermesHome, 'hermes-agent', 'scripts', installScriptName())
+  try {
+    fs.accessSync(candidate, fs.constants.R_OK)
+    return candidate
+  } catch {
+    return null
+  }
 }
 
 function cachedScriptPath(hermesHome, commit) {
@@ -155,7 +179,7 @@ function downloadInstallScript(commit, destPath) {
   })
 }
 
-async function resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, emit }) {
+async function resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, emit, _download = downloadInstallScript }) {
   // 1. Dev shortcut: prefer a local checkout's installer so we can iterate
   //    without pushing. SOURCE_REPO_ROOT comes from main.cjs (path.resolve
   //    of APP_ROOT/../..).
@@ -189,9 +213,35 @@ async function resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, 
     type: 'log',
     line: `[bootstrap] fetching ${installScriptName()} for ${installStamp.commit.slice(0, 12)} from GitHub`
   })
-  await downloadInstallScript(installStamp.commit, cached)
-  emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
-  return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
+  try {
+    await _download(installStamp.commit, cached)
+    emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
+    return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
+  } catch (err) {
+    // The pinned commit may not be fetchable from GitHub -- most commonly a
+    // locally-built desktop app stamped to an unpushed HEAD (see
+    // write-build-stamp.cjs fromLocalGit). Fall back to the installer that
+    // ships inside the already-installed agent checkout so dev/self-builds can
+    // still bootstrap instead of dying with a fatal 404.
+    const installed = installedAgentInstallScript(hermesHome)
+    if (installed) {
+      emit({
+        type: 'log',
+        line:
+          `[bootstrap] GitHub fetch failed (${err.message}); ` +
+          `falling back to installed agent ${installScriptName()} at ${installed}`
+      })
+      try {
+        fs.mkdirSync(path.dirname(cached), { recursive: true })
+        fs.copyFileSync(installed, cached)
+        return { path: cached, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
+      } catch {
+        // Cache copy failed (read-only FS, etc.) -- use the source path directly.
+        return { path: installed, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
+      }
+    }
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +293,7 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
     const ps = process.platform === 'win32' ? resolveWindowsPowerShell() : 'pwsh'
     const fullArgs = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args]
 
-    const child = spawn(ps, fullArgs, {
+    const child = spawn(ps, fullArgs, hiddenWindowsChildOptions({
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
@@ -251,7 +301,7 @@ function spawnPowerShell(scriptPath, args, { emit, stageName, abortSignal, herme
         // choice rather than re-computing the default.
         HERMES_HOME: hermesHome || process.env.HERMES_HOME || ''
       }
-    })
+    }))
 
     let stdout = ''
     let stderr = ''
@@ -673,5 +723,7 @@ module.exports = {
   // Exposed for testability
   parseStageResult,
   resolveLocalInstallScript,
+  resolveInstallScript,
+  installedAgentInstallScript,
   cachedScriptPath
 }

@@ -7,6 +7,7 @@ import type {
   AudioSpeakResponse,
   AudioTranscriptionResponse,
   AuxiliaryModelsResponse,
+  BackendUpdateCheckResponse,
   ConfigSchemaResponse,
   CronJob,
   CronJobCreatePayload,
@@ -32,6 +33,7 @@ import type {
   ProfileSetupCommand,
   ProfileSoul,
   ProfilesResponse,
+  SessionInfo,
   SessionMessagesResponse,
   SessionSearchResponse,
   SkillInfo,
@@ -41,6 +43,7 @@ import type {
 } from '@/types/hermes'
 
 const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
+const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
 export type {
   ActionResponse,
@@ -54,6 +57,7 @@ export type {
   AudioSpeakResponse,
   AudioTranscriptionResponse,
   AuxiliaryModelsResponse,
+  BackendUpdateCheckResponse,
   ConfigFieldSchema,
   ConfigSchemaResponse,
   CronJob,
@@ -135,7 +139,8 @@ export async function listSessions(
   order: 'created' | 'recent' = 'recent'
 ): Promise<PaginatedSessions> {
   const result = await window.hermesDesktop.api<PaginatedSessions>({
-    path: `/api/sessions?limit=${limit}&offset=0&min_messages=${Math.max(0, minMessages)}&archived=${archived}&order=${order}`
+    path: `/api/sessions?limit=${limit}&offset=0&min_messages=${Math.max(0, minMessages)}&archived=${archived}&order=${order}`,
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 
   return {
@@ -149,17 +154,34 @@ export async function listSessions(
 // primary backend straight off each profile's state.db — no per-profile backend
 // is spawned. Single-profile users get the same rows as listSessions(), tagged
 // profile="default".
+// Source scoping lets callers split the unified list into independent slices:
+// recents pass `excludeSources: ['cron']`, the cron-jobs section passes
+// `source: 'cron'`. Without this a burst of (always-newest) cron sessions
+// consumes the whole recents page and starves real conversations.
+export interface SessionSourceFilter {
+  source?: string
+  excludeSources?: string[]
+}
+
 export async function listAllProfileSessions(
   limit = 40,
   minMessages = 0,
   archived: 'exclude' | 'include' | 'only' = 'exclude',
   order: 'created' | 'recent' = 'recent',
-  profile: 'all' | (string & {}) = 'all'
+  profile: 'all' | (string & {}) = 'all',
+  filter: SessionSourceFilter = {}
 ): Promise<PaginatedSessions> {
+  const sourceParam = filter.source ? `&source=${encodeURIComponent(filter.source)}` : ''
+
+  const excludeParam = filter.excludeSources?.length
+    ? `&exclude_sources=${encodeURIComponent(filter.excludeSources.join(','))}`
+    : ''
+
   const result = await window.hermesDesktop.api<PaginatedSessions>({
     path:
       `/api/profiles/sessions?limit=${limit}&offset=0&min_messages=${Math.max(0, minMessages)}` +
-      `&archived=${archived}&order=${order}&profile=${encodeURIComponent(profile)}`
+      `&archived=${archived}&order=${order}&profile=${encodeURIComponent(profile)}${sourceParam}${excludeParam}`,
+    timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
   })
 
   return {
@@ -196,6 +218,7 @@ export function getSessionMessages(id: string, profile?: string | null): Promise
   const suffix = profile ? `?profile=${encodeURIComponent(profile)}` : ''
 
   return window.hermesDesktop.api<SessionMessagesResponse>({
+    ...(profile ? { profile } : {}),
     path: `/api/sessions/${encodeURIComponent(id)}/messages${suffix}`
   })
 }
@@ -321,13 +344,14 @@ export function setEnvVar(key: string, value: string): Promise<{ ok: boolean }> 
 
 export function validateProviderCredential(
   key: string,
-  value: string
+  value: string,
+  apiKey?: string
 ): Promise<{ ok: boolean; reachable: boolean; message: string; models?: string[] }> {
   return window.hermesDesktop.api<{ ok: boolean; reachable: boolean; message: string; models?: string[] }>({
     ...profileScoped(),
     path: '/api/providers/validate',
     method: 'POST',
-    body: { key, value }
+    body: { key, value, api_key: apiKey ?? '' }
   })
 }
 
@@ -486,6 +510,14 @@ export function getCronJob(jobId: string): Promise<CronJob> {
   return window.hermesDesktop.api<CronJob>({
     path: `/api/cron/jobs/${encodeURIComponent(jobId)}`
   })
+}
+
+export async function getCronJobRuns(jobId: string, limit = 20): Promise<SessionInfo[]> {
+  const { runs } = await window.hermesDesktop.api<{ runs: SessionInfo[] }>({
+    path: `/api/cron/jobs/${encodeURIComponent(jobId)}/runs?limit=${limit}`
+  })
+
+  return runs ?? []
 }
 
 export function createCronJob(body: CronJobCreatePayload): Promise<CronJob> {
@@ -655,6 +687,15 @@ export function updateHermes(): Promise<ActionResponse> {
   return window.hermesDesktop.api<ActionResponse>({
     path: '/api/hermes/update',
     method: 'POST'
+  })
+}
+
+/** Query the connected backend's own update state. In remote mode this is the
+ *  authoritative source for the backend's behind-count + "what's changed",
+ *  distinct from the Electron client clone's git state. */
+export function checkHermesUpdate(force = false): Promise<BackendUpdateCheckResponse> {
+  return window.hermesDesktop.api<BackendUpdateCheckResponse>({
+    path: `/api/hermes/update/check${force ? '?force=true' : ''}`
   })
 }
 

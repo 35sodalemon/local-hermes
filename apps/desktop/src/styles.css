@@ -5,12 +5,40 @@
 @import '@vscode/codicons/dist/codicon.css';
 @custom-variant dark (&:is(.dark *));
 
+/* Sidebar sections: tall viewports give each its own scroller; compact ones
+   (this variant) flatten everything into one shared scroll. See ChatSidebar. */
+@custom-variant compact (@media (max-height: 768px));
+
 @font-face {
   font-family: 'Collapse';
   font-style: normal;
   font-weight: 700;
   font-display: swap;
   src: url('../../../node_modules/@nous-research/ui/dist/fonts/Collapse-Bold.woff2') format('woff2');
+}
+
+/* JetBrains Mono — bundled terminal font (Apache-2.0) so bold/italic share the
+   regular face's metrics instead of squeezing against a system fallback. */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Italic.woff2') format('woff2');
 }
 
 @theme inline {
@@ -266,10 +294,12 @@
     --dt-user-bubble: var(--ui-chat-bubble-background);
     --dt-user-bubble-border: var(--ui-stroke-tertiary);
 
-    --dt-font-sans: 'Segoe WPC', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif,
+    --dt-font-sans:
+      'Segoe WPC', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif,
       'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', emoji;
-    --dt-font-mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace,
-      'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', emoji;
+    --dt-font-mono:
+      'Cascadia Code', 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace, 'Apple Color Emoji',
+      'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', emoji;
     --dt-base-size: 1rem;
     --dt-line-height: 1.5;
     --dt-letter-spacing: 0;
@@ -817,6 +847,37 @@ canvas {
    content's --message-text-indent). No extra prose indent — a single gutter
    reads cleaner than a ragged tool-vs-reply column. */
 
+/* RTL/bidi chat text (#44150): each block resolves its own base direction from
+   its first strong char (UAX#9 plaintext). text-align:start makes that resolved
+   direction drive alignment too — load-bearing, since the user bubble pins
+   text-left. direction is never set, so chrome/layout/list-indent stay LTR (the
+   issue asks not to flip the whole UI). Covers assistant prose, user lines, and
+   both composers (main + edit share composer-rich-input). */
+[data-slot='aui_assistant-message-content'] .aui-md :where(p, h1, h2, h3, h4, h5, h6, li, blockquote),
+[data-slot='aui_user-inline-text'],
+[data-slot='composer-rich-input'] {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+/* Inline code/KaTeX don't vote on direction and keep their own order: isolate
+   makes bidi treat each as one neutral, so a block that *starts* with `./run.sh`
+   then Arabic still resolves RTL, and the command's neutrals (dots/slashes)
+   aren't reordered by the surrounding RTL run. */
+[data-slot='aui_assistant-message-content'] .aui-md :where(:not(pre) > code),
+[data-slot='aui_user-inline-code'],
+[data-slot='aui_assistant-message-content'] .aui-md .katex {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Fenced code stays LTR even inside an RTL list item/blockquote — never mirrors. */
+[data-slot='aui_assistant-message-content'] .aui-md [data-slot='code-card'],
+[data-slot='aui_user-fence'] {
+  direction: ltr;
+  text-align: left;
+}
+
 [data-slot='aui_user-message-root'] {
   top: var(--sticky-human-top);
 }
@@ -888,52 +949,46 @@ canvas {
 }
 
 .fit-text {
+  --fit-captured-length: initial;
+  --fit-support-sentinel: var(--fit-captured-length, 9999px);
+
   display: flex;
-  font-size: var(--fit-text-min, 1rem);
   container-type: inline-size;
-  --captured-length: initial;
-  --support-sentinel: var(--captured-length, 9999px);
 }
 
-.fit-text > [aria-hidden='true'] {
+.fit-text > [aria-hidden] {
   visibility: hidden;
 }
 
-.fit-text > :not([aria-hidden='true']) {
+.fit-text > :not([aria-hidden]) {
   flex-grow: 1;
   container-type: inline-size;
-  --captured-length: 100cqi;
-  --available-space: var(--captured-length);
+
+  --fit-captured-length: 100cqi;
+  --fit-available-space: var(--fit-captured-length);
 }
 
-.fit-text > :not([aria-hidden='true']) > * {
+.fit-text > :not([aria-hidden]) > * {
+  --fit-support-sentinel: inherit;
+  --fit-captured-length: 100cqi;
+  --fit-ratio: tan(atan2(var(--fit-available-space), var(--fit-available-space) - var(--fit-captured-length)));
+
   display: block;
-  inline-size: var(--available-space);
-  line-height: var(--fit-text-line-height, 1);
-  --support-sentinel: inherit;
-  --captured-length: 100cqi;
-  --ratio: tan(atan2(var(--available-space), var(--available-space) - var(--captured-length)));
-  --font-size: clamp(
-    var(--fit-text-min, 1em),
-    1em * var(--ratio),
-    var(--fit-text-max, infinity * 1px) - var(--support-sentinel)
+  inline-size: var(--fit-available-space);
+  font-size: clamp(
+    var(--fit-min, 1em),
+    1em * var(--fit-ratio),
+    var(--fit-max, infinity * 1px) - var(--fit-support-sentinel)
   );
-  font-size: var(--font-size);
 }
 
 @container (inline-size > 0) {
-  .fit-text > :not([aria-hidden='true']) > * {
+  .fit-text > :not([aria-hidden]) > * {
     white-space: nowrap;
   }
 }
 
-@property --captured-length {
-  syntax: '<length>';
-  initial-value: 0px;
-  inherits: true;
-}
-
-@property --captured-length2 {
+@property --fit-captured-length {
   syntax: '<length>';
   initial-value: 0px;
   inherits: true;
